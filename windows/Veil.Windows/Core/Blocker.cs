@@ -65,7 +65,16 @@ public sealed class Blocker
 ##[id^=""google_ads_iframe""]
 ";
 
-    /// Parses all enabled lists on a background thread. Tabs wait on Ready so the first load is never unblocked.
+    static void Log(string where, Exception ex)
+    {
+        try { File.AppendAllText(System.IO.Path.Combine(Paths.DataDir, "error.log"), DateTime.Now + " [" + where + "]\n" + ex + "\n\n"); } catch { }
+    }
+
+    static void SafeAdd(FilterEngine e, string text)
+    {
+        try { e.AddList(text); } catch (Exception ex) { Log("Blocker list", ex); }
+    }
+
     public Task RebuildAsync()
     {
         var wantLists = Sources.Where(IsEnabled).Select(s => s.Id).ToList();
@@ -73,16 +82,20 @@ public sealed class Blocker
         return Task.Run(() =>
         {
             var e = new FilterEngine();
-            foreach (var id in wantLists)
+            try
             {
-                if (id == "builtin") e.AddList(Seed);
-                else if (File.Exists(File_(id))) { try { e.AddList(File.ReadAllText(File_(id))); } catch { } }
+                foreach (var id in wantLists)
+                {
+                    if (id == "builtin") SafeAdd(e, Seed);
+                    else if (File.Exists(File_(id))) { try { SafeAdd(e, File.ReadAllText(File_(id))); } catch { } }
+                }
+                SafeAdd(e, custom ?? "");
+                Meta.Mutate(m => { m.NetworkRules = e.NetworkRules; m.CosmeticRules = e.CosmeticRules; m.SkippedRules = e.Skipped; });
             }
-            e.AddList(custom ?? "");
+            catch (Exception ex) { Log("Blocker", ex); }
             engine = e;
-            Meta.Mutate(m => { m.NetworkRules = e.NetworkRules; m.CosmeticRules = e.CosmeticRules; m.SkippedRules = e.Skipped; });
             Generation++;
-            ready.TrySetResult();
+            ready.TrySetResult();   // always release the tabs, even if a list failed to parse
         }).ContinueWith(_ => Services.Notify(), TaskScheduler.FromCurrentSynchronizationContext());
     }
 
