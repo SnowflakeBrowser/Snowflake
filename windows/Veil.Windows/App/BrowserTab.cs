@@ -119,6 +119,10 @@ public sealed class BrowserTab
             // Windows/WebView2 has no per-request cookie rules; third-party blocking maps to Tracking Prevention.
             Core.Profile.PreferredTrackingPreventionLevel = Services.Settings.Str("cookieMode") == "off"
                 ? CoreWebView2TrackingPreventionLevel.None : CoreWebView2TrackingPreventionLevel.Strict;
+            // Veil's own pages and websites follow Veil's light / dark setting instead of always following Windows.
+            var th = Services.Settings.Str("theme");
+            Core.Profile.PreferredColorScheme = th == "light" ? CoreWebView2PreferredColorScheme.Light
+                : th == "system" ? CoreWebView2PreferredColorScheme.Auto : CoreWebView2PreferredColorScheme.Dark;
         }
         catch { }
     }
@@ -247,6 +251,7 @@ public sealed class BrowserTab
         Core.SourceChanged += (s, e) =>
         {
             var src = Core.Source;
+            if (src.StartsWith("veil://") && src.EndsWith("/")) src = src.TrimEnd('/');   // veil://newtab/ -> veil://newtab
             if (!src.StartsWith("data:")) Url = src;
             Raise();
         };
@@ -371,7 +376,14 @@ public sealed class BrowserTab
         var uri = e.Request.Uri;
         if (uri.StartsWith("veil://", StringComparison.OrdinalIgnoreCase))
         {
-            var html = Uri.TryCreate(uri, UriKind.Absolute, out var u) ? Pages.Html(u.Host) : null;
+            string html;
+            try { html = Uri.TryCreate(uri, UriKind.Absolute, out var u) ? Pages.Html(u.Host) : null; }
+            catch (Exception ex)
+            {
+                // Show the problem instead of a blank page.
+                html = "<!doctype html><meta charset=utf-8><body style=\"font:14px Segoe UI,sans-serif;padding:24px;color:#ddd;background:#17171a\"><h2>Veil page error</h2><pre style=\"white-space:pre-wrap\">"
+                       + Pages.Escape(ex.ToString()) + "</pre>";
+            }
             if (html == null) { e.Response = Services.Env.CreateWebResourceResponse(null, 404, "Not Found", ""); return; }
             e.Response = Services.Env.CreateWebResourceResponse(new MemoryStream(Encoding.UTF8.GetBytes(html)), 200, "OK",
                 "Content-Type: text/html; charset=utf-8\r\nCache-Control: no-store\r\nContent-Security-Policy: " + Pages.Csp);

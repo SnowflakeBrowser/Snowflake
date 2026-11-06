@@ -1,3 +1,14 @@
+// Show script errors on the page instead of leaving it blank.
+function showErr(err) {
+  try {
+    const pre = document.createElement('pre');
+    pre.style.cssText = 'padding:24px;white-space:pre-wrap;color:#f08080;font:13px Consolas,monospace';
+    pre.textContent = 'Page error:\n' + ((err && err.stack) || err);
+    (document.getElementById('app') || document.body).replaceChildren(pre);
+  } catch (_) {}
+}
+window.addEventListener('error', e => showErr(e.error || e.message));
+window.addEventListener('unhandledrejection', e => showErr(e.reason));
 const $ = (s, r = document) => r.querySelector(s);
 const h = (tag, props, ...kids) => {
   const e = document.createElement(tag);
@@ -12,7 +23,8 @@ const h = (tag, props, ...kids) => {
 };
 const call = (() => { let n = 0; const waits = new Map();
       window.chrome.webview.addEventListener('message', e => { const m = e.data; const w = m && waits.get(m.id); if (w) { waits.delete(m.id); w(m.result); } });
-      return (cmd, args = {}) => new Promise(res => { const id = ++n; waits.set(id, res); window.chrome.webview.postMessage({ id, cmd, args }); });
+      return (cmd, args = {}) => new Promise(res => { const id = ++n; waits.set(id, res); window.chrome.webview.postMessage({ id, cmd, args });
+        if (cmd !== 'lists.update') setTimeout(() => { if (waits.delete(id)) res(null); }, 10000); });
     })();
 const fmt = ts => new Date(ts * 1000).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' });
 const root = document.getElementById('app');
