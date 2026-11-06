@@ -36,14 +36,30 @@ public static class Services
 
     public static async Task InitEnvAsync()
     {
-        var opts = new CoreWebView2EnvironmentOptions();
-        opts.CustomSchemeRegistrations.Add(new CoreWebView2CustomSchemeRegistration("veil")
+        try
         {
-            TreatAsSecure = true,
-            HasAuthorityComponent = true,
-        });
-        Directory.CreateDirectory(Paths.WebViewDir);
-        Env = await CoreWebView2Environment.CreateAsync(null, Paths.WebViewDir, opts);
+            var reg = new CoreWebView2CustomSchemeRegistration("veil")
+            {
+                TreatAsSecure = true,
+                HasAuthorityComponent = true,
+            };
+            var opts = new CoreWebView2EnvironmentOptions();
+            if (opts.CustomSchemeRegistrations != null)
+                opts.CustomSchemeRegistrations.Add(reg);
+            else
+            {
+                var p = typeof(CoreWebView2EnvironmentOptions).GetProperty("CustomSchemeRegistrations");
+                if (p != null && p.CanWrite)
+                    p.SetValue(opts, new List<CoreWebView2CustomSchemeRegistration> { reg });
+            }
+            Directory.CreateDirectory(Paths.WebViewDir);
+            Env = await CoreWebView2Environment.CreateAsync(null, Paths.WebViewDir, opts);
+        }
+        catch (Exception ex)
+        {
+            // Rethrow with the full detail so the error box shows exactly where it failed.
+            throw new Exception(ex.ToString());
+        }
     }
 
     public static void Notify() => Changed?.Invoke();
