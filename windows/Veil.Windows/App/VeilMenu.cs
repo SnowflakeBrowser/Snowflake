@@ -98,7 +98,7 @@ public static class VeilMenu
             Padding = new Thickness(6), MinWidth = 210, Child = list, Margin = new Thickness(12),
             Effect = new DropShadowEffect { BlurRadius = 16, ShadowDepth = 3, Direction = 270, Opacity = 0.35, Color = Colors.Black },
         };
-        TextElement.SetFontFamily(card, UiFont);
+        System.Windows.Documents.TextElement.SetFontFamily(card, UiFont);       
         card.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
         double visibleWidth = card.DesiredSize.Width - 24;
 
