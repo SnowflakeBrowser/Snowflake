@@ -239,6 +239,16 @@ public sealed class BrowserTab
         {
             var uri = e.Uri;
             Dbg("NavigationStarting " + uri);
+            if (uri.TrimEnd('/').Equals("veil://newtab", StringComparison.OrdinalIgnoreCase))
+            {
+                // Veil's start page is drawn directly (no veil:// scheme needed), so it always shows up.
+                e.Cancel = true;
+                Url = UrlResolver.NewTab;
+                var page = Pages.NewTabHtml();
+                Later(() => Core.NavigateToString(page));
+                Raise();
+                return;
+            }
             if (uri.StartsWith("veil://insecure", StringComparison.OrdinalIgnoreCase))
             {
                 e.Cancel = true;
