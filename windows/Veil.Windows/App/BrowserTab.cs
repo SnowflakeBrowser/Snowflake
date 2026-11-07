@@ -60,6 +60,20 @@ public sealed class BrowserTab
     public bool CanGoBack => Core != null && Core.CanGoBack;
     public bool CanGoForward => Core != null && Core.CanGoForward;
     void Raise() => Changed?.Invoke();
+
+    /// Small trace file (%APPDATA%\Veil\debug.log) so problems loading Veil's own pages can be found.
+    public static void Dbg(string msg)
+    {
+        try
+        {
+            var dir = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "Veil");
+            Directory.CreateDirectory(dir);
+            var f = System.IO.Path.Combine(dir, "debug.log");
+            if (File.Exists(f) && new FileInfo(f).Length > 200000) File.Delete(f);
+            File.AppendAllText(f, DateTime.Now.ToString("HH:mm:ss.fff") + " " + msg + "\n");
+        }
+        catch { }
+    }
     static void Later(Action a) => Application.Current.Dispatcher.BeginInvoke(a);
 
     public void Navigate(string url)
@@ -104,6 +118,8 @@ public sealed class BrowserTab
         st.AreDevToolsEnabled = Services.Settings.Bool("developerTools");
         ApplyCookieMode();
         Core.AddWebResourceRequestedFilter("*", CoreWebView2WebResourceContext.All);
+        try { Core.AddWebResourceRequestedFilter("veil://*", CoreWebView2WebResourceContext.All); } catch (Exception ex) { Dbg("veil filter: " + ex.Message); }
+        Dbg("tab created, scheme filter added");
         Wire(controller);
         await ApplyScriptsAsync();
 
@@ -222,6 +238,7 @@ public sealed class BrowserTab
         Core.NavigationStarting += (s, e) =>
         {
             var uri = e.Uri;
+            Dbg("NavigationStarting " + uri);
             if (uri.StartsWith("veil://insecure", StringComparison.OrdinalIgnoreCase))
             {
                 e.Cancel = true;
@@ -264,6 +281,7 @@ public sealed class BrowserTab
         Core.NavigationCompleted += (s, e) =>
         {
             Loading = false;
+            Dbg("NavigationCompleted ok=" + e.IsSuccess + " status=" + e.WebErrorStatus + " source=" + Core.Source);
             if (!e.IsSuccess)
             {
                 if (pendingUpgrade is { } up && e.WebErrorStatus != CoreWebView2WebErrorStatus.OperationCanceled)
@@ -317,6 +335,7 @@ public sealed class BrowserTab
         Core.ContainsFullScreenElementChanged += (s, e) => win.SetFullscreen(Core.ContainsFullScreenElement);
         Core.WindowCloseRequested += (s, e) => win.CloseTab(this);
         Core.DownloadStarting += (s, e) => Services.Downloads.Attach(e);
+        Core.ProcessFailed += (s, e) => Dbg("ProcessFailed " + e.ProcessFailedKind + " " + e.Reason);
 
         Core.NewWindowRequested += async (s, e) =>
         {
@@ -348,6 +367,7 @@ public sealed class BrowserTab
 
         Core.WebMessageReceived += async (s, e) =>
         {
+            Dbg("WebMessage from " + e.Source);
             if (!(e.Source ?? "").StartsWith("veil://", StringComparison.OrdinalIgnoreCase)) return;   // web pages can never use the bridge
             try
             {
@@ -357,7 +377,7 @@ public sealed class BrowserTab
                 var cmd = root.GetProperty("cmd").GetString();
                 var args = root.TryGetProperty("args", out var a) ? a : default;
                 JsonNode result = null;
-                try { result = await Bridge.Handle(this, cmd, args); } catch { }
+                try { result = await Bridge.Handle(this, cmd, args); } catch (Exception bex) { Dbg("Bridge " + cmd + " failed: " + bex); }
                 Core.PostWebMessageAsJson(new JsonObject { ["id"] = id, ["result"] = result }.ToJsonString());
             }
             catch { }
@@ -376,6 +396,7 @@ public sealed class BrowserTab
         var uri = e.Request.Uri;
         if (uri.StartsWith("veil://", StringComparison.OrdinalIgnoreCase))
         {
+            Dbg("Request " + uri);
             string html;
             try { html = Uri.TryCreate(uri, UriKind.Absolute, out var u) ? Pages.Html(u.Host) : null; }
             catch (Exception ex)
@@ -384,6 +405,7 @@ public sealed class BrowserTab
                 html = "<!doctype html><meta charset=utf-8><body style=\"font:14px Segoe UI,sans-serif;padding:24px;color:#ddd;background:#17171a\"><h2>Veil page error</h2><pre style=\"white-space:pre-wrap\">"
                        + Pages.Escape(ex.ToString()) + "</pre>";
             }
+            Dbg("Serving " + uri + " bytes=" + (html == null ? -1 : html.Length));
             if (html == null) { e.Response = Services.Env.CreateWebResourceResponse(null, 404, "Not Found", ""); return; }
             e.Response = Services.Env.CreateWebResourceResponse(new MemoryStream(Encoding.UTF8.GetBytes(html)), 200, "OK",
                 "Content-Type: text/html; charset=utf-8\r\nCache-Control: no-store\r\nContent-Security-Policy: " + Pages.Csp);

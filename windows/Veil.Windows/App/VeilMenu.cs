@@ -28,6 +28,8 @@ public static class VeilMenu
     [DllImport("user32.dll")] static extern short GetAsyncKeyState(int vKey);
     [DllImport("user32.dll")] static extern bool GetCursorPos(out PT p);
 
+    static readonly FontFamily UiFont = new FontFamily("Segoe UI Variable Text, Segoe UI, Arial");
+
     static Popup current;
     static DispatcherTimer watcher;
 
@@ -64,8 +66,8 @@ public static class VeilMenu
                 list.Children.Add(new Border { Height = 1, Margin = new Thickness(8, 5, 8, 5), Background = line });
                 continue;
             }
-            var title = new TextBlock { Text = entry.Title, FontSize = 13, VerticalAlignment = VerticalAlignment.Center, Foreground = entry.Enabled ? text : mute };
-            var hint = new TextBlock { Text = entry.Hint, FontSize = 12, Foreground = mute, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(28, 0, 0, 0) };
+            var title = new TextBlock { Text = entry.Title, FontFamily = UiFont, FontWeight = FontWeights.Normal, FontStyle = FontStyles.Normal, FontSize = 13, VerticalAlignment = VerticalAlignment.Center, Foreground = entry.Enabled ? text : mute };
+            var hint = new TextBlock { Text = entry.Hint, FontFamily = UiFont, FontWeight = FontWeights.Normal, FontStyle = FontStyles.Normal, FontSize = 12, Foreground = mute, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(28, 0, 0, 0) };
             DockPanel.SetDock(hint, Dock.Right);
             var dock = new DockPanel { LastChildFill = true };
             dock.Children.Add(hint);
@@ -96,6 +98,7 @@ public static class VeilMenu
             Padding = new Thickness(6), MinWidth = 210, Child = list, Margin = new Thickness(12),
             Effect = new DropShadowEffect { BlurRadius = 16, ShadowDepth = 3, Direction = 270, Opacity = 0.35, Color = Colors.Black },
         };
+        TextElement.SetFontFamily(card, UiFont);
         card.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
         double visibleWidth = card.DesiredSize.Width - 24;
 
