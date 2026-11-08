@@ -14,6 +14,7 @@ sealed class Rule
     public RT Types;                    // None = any (except documents)
     public string[] IfDomains, UnlessDomains;
     Regex rx; bool broken;
+    int plain = -1;                     // -1 unknown, 1 = plain text (substring check), 0 = needs a regex
 
     public bool Matches(string url, string pageHost, string reqHost, RT type)
     {
@@ -27,6 +28,8 @@ sealed class Rule
         if (IfDomains != null && !IfDomains.Any(d => FilterEngine.HostIn(pageHost, d))) return false;
         if (UnlessDomains != null && UnlessDomains.Any(d => FilterEngine.HostIn(pageHost, d))) return false;
         if (broken) return false;
+        if (plain < 0) plain = Pattern.IndexOfAny(new[] { '*', '^', '|' }) < 0 ? 1 : 0;
+        if (plain == 1) return url.IndexOf(Pattern, MatchCase ? StringComparison.Ordinal : StringComparison.OrdinalIgnoreCase) >= 0;   // much faster than a regex
         if (rx == null)
         {
             try
