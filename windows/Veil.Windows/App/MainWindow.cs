@@ -180,6 +180,16 @@ public sealed class MainWindow : Window
         };
         Services.Changed += () => Dispatcher.BeginInvoke(new Action(OnServicesChanged));
         SourceInitialized += (s, e) => ApplyTitleBar();
+        PreviewMouseDown += (s, e) =>
+        {
+            if (!Services.Settings.Bool("mouseNavButtons")) return;
+            if (e.ChangedButton == MouseButton.XButton1) { active?.GoBack(); e.Handled = true; }
+            else if (e.ChangedButton == MouseButton.XButton2) { active?.GoForward(); e.Handled = true; }
+        };
+        idleTimer.Tick += (_, __) => DiscardIdleTabs();
+        idleTimer.Start();
+        cookieTimer.Tick += (_, __) => _ = KeepSessionCookiesAsync();
+        cookieTimer.Start();
         Loaded += async (s, e) => await StartAsync();
         Closing += OnClosing;
     }
@@ -197,6 +207,10 @@ public sealed class MainWindow : Window
             return;
         }
         _ = Services.Blocker.RebuildAsync();
+        Services.Downloads.Started += () => Dispatcher.BeginInvoke(new Action(() =>
+        {
+            if (Services.Settings.Bool("openDownloadsOnStart")) OpenInternal("veil://downloads");
+        }));
         var w = Services.Window.Value;
         if (Services.Settings.Bool("rememberWindow") && !double.IsNaN(w.Left))
         {
@@ -421,6 +435,7 @@ public sealed class MainWindow : Window
         tabs.Insert(idx, t);
         tabStrip.Children.Insert(idx, t.Header);
         FitTabs();
+        UpdateTabBadge();
         Refresh(t);
         if (activate) Activate(t);
         return t;
@@ -437,7 +452,9 @@ public sealed class MainWindow : Window
 
     public void Activate(BrowserTab t)
     {
+        if (active != null) active.LastActive = DateTime.Now;
         active = t;
+        t.LastActive = DateTime.Now;
         foreach (var x in tabs) { if (x.Host != null) x.Host.Visibility = x == t ? Visibility.Visible : Visibility.Collapsed; Refresh(x); }
         _ = ShowAsync(t);
         UpdateChrome(true);
@@ -462,6 +479,7 @@ public sealed class MainWindow : Window
         tabs.RemoveAt(i);
         tabStrip.Children.Remove(t.Header);
         FitTabs();
+        UpdateTabBadge();
         t.Dispose(content);
         if (tabs.Count == 0) { Close(); return; }
         if (active == t) Activate(tabs[Math.Min(i, tabs.Count - 1)]);
@@ -544,6 +562,8 @@ public sealed class MainWindow : Window
     {
         Theme.Apply();
         ApplyTitleBar();
+        UpdateTabBadge();
+        TitleBar.SetOpacity(this, Services.Settings.Int("windowOpacity"));
         var S = Services.Settings;
         Topmost = S.Bool("alwaysOnTop");
         starB.Visibility = S.Bool("hideBookmarkButton") ? Visibility.Collapsed : Visibility.Visible;
@@ -568,6 +588,67 @@ public sealed class MainWindow : Window
         RebuildBookmarks();
         foreach (var t in tabs) { _ = t.ApplyScriptsAsync(); Refresh(t); }
         UpdateChrome(false);
+    }
+
+    // ---------- settings that need a little native help ----------
+    readonly System.Windows.Threading.DispatcherTimer idleTimer = new() { Interval = TimeSpan.FromSeconds(60) };
+    readonly System.Windows.Threading.DispatcherTimer cookieTimer = new() { Interval = TimeSpan.FromSeconds(45) };
+
+    /// "Unload tabs you have not used for a while": frees the memory of idle background tabs; they reload when you click them.
+    void DiscardIdleTabs()
+    {
+        int mins = Services.Settings.Int("discardIdleTabsMinutes");
+        if (mins <= 0) return;
+        foreach (var t in tabs.ToList())
+        {
+            if (t == active || t.Core == null || t.IsPrivate || t.IsPopup || t.Audible || t.Loading) continue;
+            if ((DateTime.Now - t.LastActive).TotalMinutes < mins) continue;
+            t.PendingUrl = t.Url;
+            t.Dispose(content);
+        }
+    }
+
+    /// "Keep me signed in across restarts": turns login (session) cookies into 30-day cookies so they survive quitting.
+    async Task KeepSessionCookiesAsync()
+    {
+        try
+        {
+            if (!Services.Settings.Bool("keepSessionCookies")) return;
+            var core = PersistentCore();
+            if (core == null) return;
+            foreach (var c in await core.CookieManager.GetCookiesAsync(null))
+            {
+                if (!c.IsSession) continue;
+                c.Expires = DateTime.UtcNow.AddDays(30);
+                core.CookieManager.AddOrUpdateCookie(c);
+            }
+        }
+        catch { }
+    }
+
+    /// "Show tab count": number badge on the taskbar icon.
+    void UpdateTabBadge()
+    {
+        try
+        {
+            if (TaskbarItemInfo == null) TaskbarItemInfo = new System.Windows.Shell.TaskbarItemInfo();
+            if (!Services.Settings.Bool("dockTabCount") || tabs.Count == 0) { TaskbarItemInfo.Overlay = null; return; }
+            var accent = ((SolidColorBrush)FindResource("Accent")).Color;
+            bool darkAccent = (accent.R * 299 + accent.G * 587 + accent.B * 114) / 1000 < 140;
+            var dv = new DrawingVisual();
+            using (var dc = dv.RenderOpen())
+            {
+                dc.DrawEllipse(new SolidColorBrush(accent), null, new Point(16, 16), 15, 15);
+                var ft = new FormattedText(tabs.Count.ToString(), System.Globalization.CultureInfo.InvariantCulture, FlowDirection.LeftToRight,
+                    new Typeface("Segoe UI"), tabs.Count > 9 ? 15 : 19, darkAccent ? Brushes.White : Brushes.Black, VisualTreeHelper.GetDpi(this).PixelsPerDip);
+                dc.DrawText(ft, new Point(16 - ft.Width / 2, 16 - ft.Height / 2));
+            }
+            var rtb = new System.Windows.Media.Imaging.RenderTargetBitmap(32, 32, 96, 96, PixelFormats.Pbgra32);
+            rtb.Render(dv);
+            rtb.Freeze();
+            TaskbarItemInfo.Overlay = rtb;
+        }
+        catch { }
     }
 
     readonly Dictionary<string, ImageSource> favCache = new();

@@ -32,6 +32,7 @@ public sealed class BrowserTab
     public ImageSource Favicon;
     public bool Loading, Audible, Muted;
     public string PendingUrl;
+    public DateTime LastActive = DateTime.Now;
     public bool IsPopup;                    // created for window.open: the engine navigates it, we must not
     public Border Header;                   // tab strip item (built by MainWindow)
     public event Action Changed;
@@ -243,7 +244,7 @@ public sealed class BrowserTab
             {
                 // Veil's own pages are drawn directly (no custom scheme needed), so they always show up.
                 var vhost = Uri.TryCreate(uri, UriKind.Absolute, out var vuri) ? vuri.Host.ToLowerInvariant() : "";
-                var vpage = vhost == "newtab" ? Pages.NewTabHtml() : Pages.Html(vhost);
+                var vpage = Pages.Html(vhost);   // the same start page and settings pages as the Mac version
                 if (vpage != null)
                 {
                     e.Cancel = true;
