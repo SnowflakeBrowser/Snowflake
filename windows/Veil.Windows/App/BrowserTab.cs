@@ -239,15 +239,19 @@ public sealed class BrowserTab
         {
             var uri = e.Uri;
             Dbg("NavigationStarting " + uri);
-            if (uri.TrimEnd('/').Equals("veil://newtab", StringComparison.OrdinalIgnoreCase))
+            if (uri.StartsWith("veil://", StringComparison.OrdinalIgnoreCase) && !uri.StartsWith("veil://insecure", StringComparison.OrdinalIgnoreCase))
             {
-                // Veil's start page is drawn directly (no veil:// scheme needed), so it always shows up.
-                e.Cancel = true;
-                Url = UrlResolver.NewTab;
-                var page = Pages.NewTabHtml();
-                Later(() => Core.NavigateToString(page));
-                Raise();
-                return;
+                // Veil's own pages are drawn directly (no custom scheme needed), so they always show up.
+                var vhost = Uri.TryCreate(uri, UriKind.Absolute, out var vuri) ? vuri.Host.ToLowerInvariant() : "";
+                var vpage = vhost == "newtab" ? Pages.NewTabHtml() : Pages.Html(vhost);
+                if (vpage != null)
+                {
+                    e.Cancel = true;
+                    Url = uri.TrimEnd('/');
+                    Later(() => Core.NavigateToString(vpage));
+                    Raise();
+                    return;
+                }
             }
             if (uri.StartsWith("veil://insecure", StringComparison.OrdinalIgnoreCase))
             {
@@ -378,7 +382,12 @@ public sealed class BrowserTab
         Core.WebMessageReceived += async (s, e) =>
         {
             Dbg("WebMessage from " + e.Source);
-            if (!(e.Source ?? "").StartsWith("veil://", StringComparison.OrdinalIgnoreCase)) return;   // web pages can never use the bridge
+            // Only Veil's own pages may use the bridge: either served from veil://, or drawn directly while this tab is showing a veil:// page.
+            var origin = e.Source ?? "";
+            bool ours = origin.StartsWith("veil://", StringComparison.OrdinalIgnoreCase)
+                        || ((origin.StartsWith("data:text/html", StringComparison.OrdinalIgnoreCase) || origin == "about:blank")
+                            && Url.StartsWith("veil://", StringComparison.OrdinalIgnoreCase));
+            if (!ours) return;
             try
             {
                 using var doc = JsonDocument.Parse(e.WebMessageAsJson);

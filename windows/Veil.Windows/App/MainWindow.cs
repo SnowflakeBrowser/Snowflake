@@ -190,8 +190,8 @@ public sealed class MainWindow : Window
         try { await Services.InitEnvAsync(); }
         catch (Exception ex)
         {
-            if (MessageBox.Show("Veil needs the Microsoft WebView2 Runtime, which could not be started.\n\n" + ex.Message +
-                                "\n\nOpen the download page?", "Veil", MessageBoxButton.YesNo, MessageBoxImage.Error) == MessageBoxResult.Yes)
+            if (MessageBox.Show("Veil could not start its browser engine.\n\n" + ex.Message +
+                                "\n\nIf this says the Microsoft WebView2 Runtime is missing, install it. Open the download page?", "Veil", MessageBoxButton.YesNo, MessageBoxImage.Error) == MessageBoxResult.Yes)
                 System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("https://developer.microsoft.com/microsoft-edge/webview2/") { UseShellExecute = true });
             Close();
             return;
@@ -570,6 +570,64 @@ public sealed class MainWindow : Window
         UpdateChrome(false);
     }
 
+    readonly Dictionary<string, ImageSource> favCache = new();
+    readonly HashSet<string> favTried = new();
+
+    ImageSource FaviconFor(string host)
+    {
+        if (string.IsNullOrEmpty(host)) return null;
+        if (favCache.TryGetValue(host, out var cached)) return cached;
+        ImageSource src = null;
+        var bytes = Services.LoadFavicon(host);
+        if (bytes != null && bytes.Length > 0)
+        {
+            try
+            {
+                var bi = new System.Windows.Media.Imaging.BitmapImage();
+                bi.BeginInit();
+                bi.CacheOption = System.Windows.Media.Imaging.BitmapCacheOption.OnLoad;
+                bi.StreamSource = new MemoryStream(bytes);
+                bi.EndInit();
+                bi.Freeze();
+                src = bi;
+            }
+            catch { }
+        }
+        if (src != null) favCache[host] = src;
+        return src;
+    }
+
+    /// Bookmarks of sites that were never opened get their icon from the site's own /favicon.ico (once per site).
+    async Task FetchFaviconAsync(string host)
+    {
+        try
+        {
+            using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(6) };
+            http.DefaultRequestHeaders.UserAgent.ParseAdd("Mozilla/5.0");
+            var bytes = await http.GetByteArrayAsync("https://" + host + "/favicon.ico");
+            if (bytes.Length < 100 || bytes.Length > 300000) return;
+            var bi = new System.Windows.Media.Imaging.BitmapImage();
+            bi.BeginInit();
+            bi.CacheOption = System.Windows.Media.Imaging.BitmapCacheOption.OnLoad;
+            bi.StreamSource = new MemoryStream(bytes);
+            bi.EndInit();                       // throws if the file is not a real image
+            Services.SaveFavicon(host, bytes);  // the bar redraws with the icon
+        }
+        catch { }
+    }
+
+    FrameworkElement LetterIcon(string host, string title)
+    {
+        var t = !string.IsNullOrEmpty(host) ? host : (title ?? "");
+        if (t.StartsWith("www.")) t = t.Substring(4);
+        var letter = t.Length > 0 ? t.Substring(0, 1).ToUpperInvariant() : "+";
+        var tb = new TextBlock { Text = letter, FontSize = 9, FontWeight = FontWeights.SemiBold, HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center };
+        tb.SetResourceReference(TextBlock.ForegroundProperty, "Accent");
+        var bd = new Border { Width = 16, Height = 16, CornerRadius = new CornerRadius(4), Margin = new Thickness(0, 0, 6, 0), Child = tb, BorderThickness = new Thickness(1) };
+        bd.SetResourceReference(Border.BorderBrushProperty, "Line");
+        return bd;
+    }
+
     void RebuildBookmarks()
     {
         bookmarksBar.Children.Clear();
@@ -579,7 +637,17 @@ public sealed class MainWindow : Window
         foreach (var bm in Services.Bookmarks.All)
         {
             var title = bm.Title.Length > 22 ? bm.Title.Substring(0, 21) + "…" : bm.Title;
-            var b = new Button { Content = title, Template = FlatTemplate, Background = Brushes.Transparent, Padding = new Thickness(8, 3, 8, 3), Margin = new Thickness(1, 0, 1, 0), Focusable = false, ToolTip = bm.Url, FontSize = 12 };
+            var host = UrlResolver.HostOf(bm.Url);
+            var row = new StackPanel { Orientation = Orientation.Horizontal };
+            var ico = FaviconFor(host);
+            if (ico != null) row.Children.Add(new Image { Source = ico, Width = 16, Height = 16, Margin = new Thickness(0, 0, 6, 0) });
+            else
+            {
+                row.Children.Add(LetterIcon(host, bm.Title));
+                if (!string.IsNullOrEmpty(host) && favTried.Add(host) && bm.Url.StartsWith("http", StringComparison.OrdinalIgnoreCase)) _ = FetchFaviconAsync(host);
+            }
+            row.Children.Add(new TextBlock { Text = title, VerticalAlignment = VerticalAlignment.Center });
+            var b = new Button { Content = row, Template = FlatTemplate, Background = Brushes.Transparent, Padding = new Thickness(8, 3, 8, 3), Margin = new Thickness(1, 0, 1, 0), Focusable = false, ToolTip = bm.Url, FontSize = 12 };
             b.SetResourceReference(Control.ForegroundProperty, "Text");
             var url = bm.Url;
             b.Click += (_, __) => active?.Navigate(url);

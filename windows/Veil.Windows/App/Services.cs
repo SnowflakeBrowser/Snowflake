@@ -76,7 +76,9 @@ public static class Services
     public static void SaveFavicon(string host, byte[] png)
     {
         if (string.IsNullOrEmpty(host) || png == null || png.Length == 0) return;
-        try { File.WriteAllBytes(FavFile(host), png); } catch { }
+        bool isNew;
+        try { var f = FavFile(host); isNew = !File.Exists(f); File.WriteAllBytes(f, png); } catch { return; }
+        if (isNew) Notify();      // lets the bookmarks bar and start page pick the icon up
     }
     public static byte[] LoadFavicon(string host)
     {

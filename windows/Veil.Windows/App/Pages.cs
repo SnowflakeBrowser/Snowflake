@@ -20,6 +20,7 @@ public static class Pages
         if (!Names.Contains(name)) return null;
         return $@"<!doctype html><html><head><meta charset=""utf-8"">
 <meta name=""viewport"" content=""width=device-width,initial-scale=1"">
+<meta http-equiv=""Content-Security-Policy"" content=""{Csp}"">
 <meta name=""color-scheme"" content=""dark light""><title>Veil</title>
 <style>{Css}</style></head>
 <body data-page=""{name}""><div id=""app""></div><script>{Script}</script></body></html>";
@@ -42,6 +43,7 @@ input:focus{border-color:var(--accent)}
 input::placeholder{color:var(--mute)}
 .tiles{display:flex;flex-wrap:wrap;justify-content:center;gap:14px;margin-top:34px}
 .tile{width:92px;text-align:center;color:var(--text);text-decoration:none}
+.ic img{width:30px;height:30px;border-radius:7px}
 .ic{width:56px;height:56px;margin:0 auto 8px;border-radius:16px;background:var(--panel);border:1px solid var(--line);display:flex;align-items:center;justify-content:center;font-size:22px;font-weight:600;color:var(--accent);transition:transform .15s,border-color .15s}
 .tile:hover .ic{transform:translateY(-2px);border-color:var(--accent)}
 .n{font-size:12px;color:var(--mute);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
@@ -112,7 +114,9 @@ document.getElementById('f').addEventListener('submit', function(e){ e.preventDe
                     var title = item?["title"]?.GetValue<string>();
                     if (string.IsNullOrWhiteSpace(title)) title = UrlResolver.HostOf(url);
                     var letter = string.IsNullOrEmpty(title) ? "+" : title.Substring(0, 1).ToUpperInvariant();
-                    tiles.Append("<a class=\"tile\" href=\"").Append(Escape(url)).Append("\"><div class=\"ic\">").Append(Escape(letter))
+                    var fav = Services.LoadFavicon(UrlResolver.HostOf(url));
+                    var icon = fav != null && fav.Length > 0 ? "<img src=\"data:image/png;base64," + Convert.ToBase64String(fav) + "\">" : Escape(letter);
+                    tiles.Append("<a class=\"tile\" href=\"").Append(Escape(url)).Append("\"><div class=\"ic\">").Append(icon)
                          .Append("</div><div class=\"n\">").Append(Escape(title)).Append("</div></a>");
                 }
         }
