@@ -180,9 +180,18 @@ async function settingsPage() {
       row('Reset fun settings', 'Puts everything in Window fun and Web page fun back to normal.',
         h('button', { class: 'danger', onclick: () => applyPreset('Normal') }, 'Reset'))),
 
+    h('h2', {}, 'Tabs and address bar'),
+    h('div', { class: 'card' },
+      toggle('linkTabsNextToOpener', 'Open links next to the page they came from', 'Links and pop-ups open right after that tab. The + button and Ctrl+T still add a tab at the end.'),
+      toggle('tabOutlines', 'Faint outline around tabs', 'Makes it easier to see where each tab starts and ends.'),
+      toggle('suggestionsEnabled', 'Show suggestions while typing in the address bar', null),
+      toggle('suggestFromHistory', 'Suggest sites from my history and bookmarks', 'Off = only the search row and popular sites.'),
+      toggle('suggestPopularSites', 'Include popular sites in suggestions', 'A built-in list such as YouTube and Wikipedia.'),
+      toggle('videoShortcuts', 'Video keyboard shortcuts', 'Alt+] faster, Alt+[ slower, Alt+P picture in picture. Applies to pages you open after changing it.')),
+
     h('h2', {}, 'Tidy up'),
     h('div', { class: 'card' },
-      toggle('newTabNextToCurrent', 'Open new tabs next to the current tab', 'Off = new tabs go to the far end.'),
+      toggle('newTabNextToCurrent', 'Open every new tab next to the current tab', 'Also applies to the + button and Ctrl+T. Off = they go to the far end.'),
       toggle('rememberWindow', 'Remember window size and position', null),
       toggle('confirmCloseWindow', 'Ask before closing a window with several tabs', null),
       toggle('hideShieldButton', 'Hide the shield button', 'You can still reach it from the privacy page.'),
@@ -193,7 +202,7 @@ async function settingsPage() {
     h('div', { class: 'card' },
       row('See-through window', 'Lower = more see-through. Applies right away.', h('input', { type: 'range', min: 60, max: 100, value: s.windowOpacity, onchange: e => set('windowOpacity', Number(e.target.value)) })),
       toggle('alwaysOnTop', 'Keep window on top', 'Veil floats above your other apps.'),
-      toggle('dockTabCount', 'Show tab count on the Dock icon', null),
+      toggle('dockTabCount', 'Show tab count on the taskbar icon', null),
       toggle('confirmQuit', 'Ask before quitting with several tabs open', null),
       toggle('downloadSound', 'Play a sound when a download finishes', null)),
 
@@ -216,7 +225,7 @@ async function settingsPage() {
 
     h('h2', {}, 'Start page'),
     h('div', { class: 'card' },
-      row('Background', null, ntSelect('background', [['aurora', 'Aurora'], ['poster', 'Poster'], ['plain', 'Plain'], ['grain', 'Soft grain'], ['dusk', 'Dusk'], ['forest', 'Forest'], ['ember', 'Ember'], ['midnight', 'Midnight'], ['paper', 'Paper'], ['ocean', 'Ocean'], ['sunset', 'Sunset'], ['neon', 'Neon'], ['candy', 'Candy'], ['sakura', 'Sakura'], ['custom', 'My picture']])),
+      row('Background', null, ntSelect('background', [['aurora', 'Aurora'], ['poster', 'Poster'], ['plain', 'Plain'], ['grain', 'Soft grain'], ['obsidian', 'Obsidian (pure black)'], ['graphite', 'Graphite'], ['slate', 'Slate'], ['moss', 'Moss'], ['wine', 'Wine'], ['sand', 'Sand'], ['mist', 'Mist'], ['snow', 'Snow'], ['dusk', 'Dusk'], ['forest', 'Forest'], ['ember', 'Ember'], ['midnight', 'Midnight'], ['paper', 'Paper'], ['ocean', 'Ocean'], ['sunset', 'Sunset'], ['neon', 'Neon'], ['candy', 'Candy'], ['sakura', 'Sakura'], ['custom', 'My picture']])),
       row('My picture', 'Choose any image. It is shrunk and stored only on this PC.', h('div', { class: 'actions', style: 'margin:0' },
         h('button', { onclick: () => picker.click() }, 'Choose…'),
         h('button', { onclick: async () => { await call('background.clear'); nt.customImage = false; if (nt.background === 'custom') nt.background = 'aurora'; saveNT(); picStatus.textContent = 'Picture removed.'; } }, 'Remove'), picker)),
@@ -228,6 +237,7 @@ async function settingsPage() {
       row('Shortcut size', null, ntSelect('tileSize', [['small', 'Small'], ['medium', 'Medium'], ['large', 'Large']])),
       ntToggle('showLabels', 'Show shortcut names', null),
       row('Your name', 'Used in the greeting.', h('input', { type: 'text', value: nt.name, placeholder: 'Name', onchange: e => { nt.name = e.target.value.trim(); saveNT(); } })),
+      row('Custom greeting', 'Shown instead of “Good evening”. Clear it to go back to the default.', h('input', { type: 'text', value: nt.greeting || '', placeholder: 'Default', onchange: e => { nt.greeting = e.target.value.trim(); saveNT(); } })),
       ntToggle('showClock', 'Show clock', null),
       ntToggle('use24Hour', '24-hour clock', null),
       ntToggle('showSearch', 'Show search box', null),
@@ -401,9 +411,8 @@ async function downloadsPage() {
   setInterval(() => { if (!document.hidden) draw(); }, 1500);
 }
 
-const LINES = ['Quiet web, loud ideas.', 'Nobody is watching. Browse freely.', 'Small tabs, big thoughts.', 'Today is a good day to close twelve tabs.',
-  'Take the scenic route through the internet.', 'Hydrate. Then keep scrolling.', 'Curiosity is the best extension.', 'Fresh tab, fresh start.',
-  'Be kind to your RAM.', 'Somewhere, a cat video is waiting for you.', 'Make it a good one.', 'The best tab is the one you meant to open.'];
+const LINES = ['Today is a good day to close twelve tabs.', 'Take the scenic route through the internet.', 'Hydrate. Then keep scrolling.',
+  'Be kind to your RAM.', 'Somewhere, a cat video is waiting for you.'];
 
 function backdrop(bg, animated, nt) {
   if (!bg || bg === 'glow') bg = 'aurora';
@@ -520,7 +529,7 @@ async function newtabPage() {
     const tiles = nt.shortcuts.map((s, i) => h('a', { class: 'tile', href: editing ? '#' : s.url, onclick: e => { if (editing) e.preventDefault(); } },
       icons[s.url]
         ? h('div', { class: 'm icon' }, h('img', { src: icons[s.url] }))
-        : h('div', { class: 'm', style: 'background:linear-gradient(145deg,hsl(' + hue(s.title) + ',38%,46%),hsl(' + hue(s.title) + ',34%,28%))' }, (s.title[0] || '•').toUpperCase()),
+        : h('div', { class: 'm', style: 'background:hsl(' + hue(s.title) + ',14%,24%)' }, (s.title[0] || '•').toUpperCase()),
       h('div', { class: 'n' }, s.title),
       editing ? h('span', { class: 'x', onclick: e => { e.preventDefault(); e.stopPropagation(); nt.shortcuts.splice(i, 1); save(); draw(); } }, '×') : null));
     const t = h('input', { type: 'text', placeholder: 'Name' }), u = h('input', { type: 'text', placeholder: 'example.com' });

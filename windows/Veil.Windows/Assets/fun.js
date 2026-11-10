@@ -1,6 +1,6 @@
 (() => {
   try {
-    if (location.protocol === 'veil:' || window.__veilFun) return;
+    if (location.protocol === 'veil:' || location.protocol === 'data:' || window.__veilFun) return;
     window.__veilFun = true;
     const C = __CONFIG__;
     const go = () => {

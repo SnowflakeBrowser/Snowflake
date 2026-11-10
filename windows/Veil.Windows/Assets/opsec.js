@@ -1,6 +1,6 @@
 (() => {
   try {
-    if (location.protocol === 'veil:') return;
+    if (location.protocol === 'veil:' || location.protocol === 'data:') return;
     const C = __CONFIG__;
     const put = (obj, name, value) => { try { Object.defineProperty(obj, name, { value: value, configurable: true, writable: true }); } catch (e) {} };
     const getter = (obj, name, fn) => { try { Object.defineProperty(obj, name, { get: fn, configurable: true }); } catch (e) {} };
