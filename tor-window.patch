@@ -1,0 +1,1800 @@
+diff -ruN orig/veil-main/windows/README.md veil-main/windows/README.md
+--- orig/veil-main/windows/README.md	2026-11-10 06:25:14.000000000 +0000
++++ veil-main/windows/README.md	2026-11-10 13:29:02.568991154 +0000
+@@ -26,6 +26,12 @@
+ Expect to fix a few compile errors on the first `dotnet build` (the GitHub workflow will show them). Please test with the
+ checklist in the main README plus: tabs in the background, `window.open` popups (Google sign-in), downloads, and ad blocking.
+ 
++## Tor window
++
++Menu ▸ **New Tor window** (Alt+Shift+N) opens a separate window whose traffic goes through the official Tor daemon. Needs `tor.exe`
++in a `tor` folder next to `Veil.exe`: run `scripts\build_windows.ps1 -FetchTor`. Design, limits and test plan: [TOR-WINDOW.md](TOR-WINDOW.md).
++**Like the rest of this port, the Tor code has not been compiled or run yet.**
++
+ ## What differs from the Mac version
+ 
+ | Area | Windows behaviour |
+diff -ruN orig/veil-main/windows/TOR-WINDOW.md veil-main/windows/TOR-WINDOW.md
+--- orig/veil-main/windows/TOR-WINDOW.md	1970-01-01 00:00:00.000000000 +0000
++++ veil-main/windows/TOR-WINDOW.md	2026-11-10 13:29:02.556548214 +0000
+@@ -0,0 +1,65 @@
++# New Tor window
++
++Menu ▸ **New Tor window**, or **Alt+Shift+N** (`Ctrl+Shift+N` was already "New private tab").
++A Tor window is a separate top-level window with its own address bar, navigation buttons and tab strip, in your
++normal theme, plus a purple address bar and a **Tor status pill** (green = verified and connected, amber = working,
++red = offline/error; click it for details and "Try again"). You can open as many Tor windows as you like.
++
++## Architecture
++
++Veil is a WPF shell around Edge **WebView2**, not a Chromium fork, so Tor is wired in at the WebView2 level.
++
++| Piece | File | Job |
++|---|---|---|
++| Tor daemon | `tor\` next to `Veil.exe` | Unmodified `tor.exe` from the official Tor Expert Bundle (`scripts\fetch_tor.ps1`) |
++| `TorManager` | `App/Tor/TorManager.cs` | One shared tor.exe, reference-counted by Tor windows. Generated torrc, loopback-only SOCKS + control ports, cookie auth, `__OwningControllerProcess` (Tor exits if Veil dies). Monitors the circuit, restarts Tor (3 tries), verifies again before unblocking |
++| `TorControl` | `App/Tor/TorControl.cs` | Tiny control-port client (AUTHENTICATE / GETINFO / SIGNAL) |
++| `TorBrowserEnv` | `App/Tor/TorBrowserEnv.cs` | A **separate WebView2 environment** (own browser process, own throw-away user-data folder under `%LOCALAPPDATA%\Veil\TorSession`) launched with the proxy switches below |
++| Tor mode | `App/MainWindow.Tor.cs`, small guarded edits in `MainWindow.cs` / `BrowserTab.cs` | Same toolbar/tabs/theme; status pill; fail-closed gate; cleanup |
++
++### Why traffic cannot silently go direct
++1. `--proxy-server=socks5://127.0.0.1:<port>`: Chromium has **no DIRECT fallback** for a single explicit proxy; if Tor is down, requests fail.
++2. `--proxy-bypass-list=<-loopback>`: even localhost goes through the proxy (Tor refuses it).
++3. `--host-resolver-rules="MAP * ~NOTFOUND , EXCLUDE 127.0.0.1"`: Chromium cannot resolve names itself, so a would-be DNS leak fails. With `socks5://` the host name is sent to Tor and resolved there.
++4. `--disable-quic`, `--force-webrtc-ip-handling-policy=disable_non_proxied_udp`: no UDP side channels. SmartScreen reputation checks are off in Tor tabs.
++5. In-app kill switch: Tor tabs may only navigate to http(s) while `TorUsable` (verified **and** Tor reports Connected). Subresource requests get a 503 otherwise. `file:`, `edge:`, `ftp:` are blocked.
++6. Startup gate: no tab loads until (a) Tor says bootstrap 100% with a circuit, (b) `check.torproject.org/api/ip` fetched **through the SOCKS port** says `IsTor:true`, and (c) the same API loaded **inside the Tor window's own browser engine** says `IsTor:true`. Failure locks the window; there is no "continue anyway".
++
++### Session isolation
++- Own WebView2 environment + a per-window **in-private** profile: cookies, cache and storage are in memory and separate from normal windows and from other Tor windows.
++- Tor tabs never write history, favicons, permissions, bookmarks, allow-list entries, download records, session/bounds files or debug-log lines. No bridge (`veil://settings` etc. shows "Not available"). All permission prompts are denied.
++- On close: cookies deleted, WebView2 views closed, the environment released and its folder deleted (retried for ~60 s while the browser process exits); leftovers from a crash are swept at the next launch. Closing the main window closes all Tor windows first and stops tor.exe.
++- Persisting on disk by design: Tor's own data directory `%LOCALAPPDATA%\Veil\Tor\data` (cached consensus, guard state) and `run\tor.log` (notice level, SafeLogging). Delete that folder to forget that Tor was ever used.
++
++## Building
++```
++.\windows\scripts\build_windows.ps1 -FetchTor        # downloads + verifies the official bundle, then builds
++```
++`fetch_tor.ps1` checks the SHA-256 from `sha256sums-signed-build.txt` and the OpenPGP signature (key
++`EF6E 286D DA85 EA2A 4BA7 DE68 4E2C 6E87 9329 8290`, "Tor Browser Developers"; needs `gpg`). Licenses: see
++`ThirdParty/NOTICE-tor.txt`; **add the full license texts of the exact Tor release before you distribute**.
++The GitHub workflows still build without Tor (the menu item then explains how to add it); add `-FetchTor` to their build step and make `gpg` available (Git for Windows ships one in `C:\Program Files\Git\usr\bin`) when you want Tor in CI builds.
++
++## Known limits (be honest with users)
++- **Not Tor Browser.** Edge's fingerprint (UA, fonts, screen size, WebGL) is not uniform, there is no first-party circuit isolation (Chromium cannot send SOCKS credentials), so all tabs/windows share circuits. It hides your IP and DNS from sites and your ISP, nothing more. The Tor start page says so.
++- If Tor dies, the SOCKS port briefly has no listener; the kill switch blocks the pages, and re-opening is gated on a fresh `IsTor` verification, so a different local program taking that port cannot be mistaken for Tor.
++- No bridges / pluggable transports UI yet (obfs4 is in the bundle if you want to add it); networks that block Tor will show "could not connect".
++- Downloads in Tor tabs use WebView2's built-in prompt and go to your normal Downloads folder.
++
++## Test plan
++Needs a Windows machine with the bundle installed. `scripts\check_tor_traffic.ps1` automates the socket check.
++
++| # | Test | How | Expect |
++|---|---|---|---|
++| 1 | Normal windows unaffected | Browse normally; open `https://check.torproject.org` | "Sorry. You are not using Tor"; your real IP |
++| 2 | Tor window opens | Menu ▸ New Tor window / Alt+Shift+N | Separate window, purple bar; overlay "Connecting to Tor 0-100%", tab with Tor start page, green pill |
++| 3 | Loads through Tor | Menu ▸ Check Tor connection | "Congratulations. This browser is configured to use Tor", exit IP ≠ yours. Run `check_tor_traffic.ps1`: PASS |
++| 4 | Multiple tabs | Ctrl+T ×3, load different sites, Ctrl+W, drag/switch | All work, all show a Tor exit IP |
++| 5 | Normal windows don't use Tor | While a Tor window is open, check a normal tab | Still your real IP |
++| 6 | Disconnect = no fallback | Kill `tor.exe` in Task Manager (or disable the network adapter) while browsing | Overlay "Tor is not connected"; pages blocked; `check_tor_traffic.ps1` shows no direct sockets; Veil restarts Tor; pill returns to green only after re-verification. Also test: Tor missing → menu message |
++| 7 | Cleanup on close | Log in to a site / set a cookie in the Tor window, close it, check `%LOCALAPPDATA%\Veil\TorSession` (empty within ~1 min), open a new Tor window | Site shows you logged out; no new entries in History/Downloads of the normal window |
++| 8 | Second Tor window | Alt+Shift+N twice | Both work, cookies not shared between them; closing one leaves the other connected; closing the last stops `tor.exe` |
++
++Also check: closing the main window with Tor windows open exits cleanly and leaves no `tor.exe`.
++Packet-level proof (optional): `pktmon filter add -i 1.1.1.1` is not needed; simply capture with Wireshark on your
++physical adapter and confirm the only traffic from the Tor window is to Tor relays (via `tor.exe`), never to site IPs.
+diff -ruN orig/veil-main/windows/Veil.Windows/App/BrowserTab.cs veil-main/windows/Veil.Windows/App/BrowserTab.cs
+--- orig/veil-main/windows/Veil.Windows/App/BrowserTab.cs	2026-11-10 06:25:14.000000000 +0000
++++ veil-main/windows/Veil.Windows/App/BrowserTab.cs	2026-11-10 07:16:04.764470963 +0000
+@@ -9,6 +9,7 @@
+ using System.Windows.Media.Imaging;
+ using Microsoft.Web.WebView2.Core;
+ using Veil.Core;
++using Veil.Tor;
+ 
+ namespace Veil;
+ 
+@@ -34,6 +35,8 @@
+     public string PendingUrl;
+     public DateTime LastActive = DateTime.Now;
+     public bool IsPopup;                    // created for window.open: the engine navigates it, we must not
++    public bool IsTor => win.IsTor;         // lives in a Tor window: Tor environment, no persistence, no bridge
++    CoreWebView2Environment env;            // the environment this tab was created in (Services.Env, or the Tor one)
+     public Border Header;                   // tab strip item (built by MainWindow)
+     public event Action Changed;
+ 
+@@ -76,6 +79,8 @@
+         catch { }
+     }
+     static void Later(Action a) => Application.Current.Dispatcher.BeginInvoke(a);
++    /// Debug trace for normal tabs. Tor tabs never write anything about their browsing to disk.
++    void D(string msg) { if (!IsTor) Dbg(msg); }
+ 
+     public void Navigate(string url)
+     {
+@@ -100,10 +105,12 @@
+         Host.UpdateLayout();
+         var hwnd = await Host.HandleReady;
+         await Services.Blocker.Ready;
+-        var opts = Services.Env.CreateCoreWebView2ControllerOptions();
+-        opts.ProfileName = IsPrivate ? "VeilPrivate" : "Default";
++        // Tor tabs use the Tor environment (proxied, throw-away folder) and their window's own in-private profile.
++        env = IsTor ? await win.TorEnvTask : Services.Env;
++        var opts = env.CreateCoreWebView2ControllerOptions();
++        opts.ProfileName = IsTor ? win.TorProfileName : IsPrivate ? "VeilPrivate" : "Default";
+         opts.IsInPrivateModeEnabled = IsPrivate;
+-        var controller = await Services.Env.CreateCoreWebView2ControllerAsync(hwnd, opts);
++        var controller = await env.CreateCoreWebView2ControllerAsync(hwnd, opts);
+         Host.Controller = controller;
+         Core = controller.CoreWebView2;
+         var dpi = VisualTreeHelper.GetDpi(Host);
+@@ -117,10 +124,16 @@
+         st.IsGeneralAutofillEnabled = false;
+         st.IsPasswordAutosaveEnabled = false;
+         st.AreDevToolsEnabled = Services.Settings.Bool("developerTools");
++        if (IsTor)
++        {
++            // SmartScreen would send the addresses you visit to Microsoft; keep Tor browsing between you and Tor.
++            try { st.IsReputationCheckingRequired = false; } catch { }
++            try { st.IsGeneralAutofillEnabled = false; st.IsPasswordAutosaveEnabled = false; } catch { }
++        }
+         ApplyCookieMode();
+         Core.AddWebResourceRequestedFilter("*", CoreWebView2WebResourceContext.All);
+-        try { Core.AddWebResourceRequestedFilter("veil://*", CoreWebView2WebResourceContext.All); } catch (Exception ex) { Dbg("veil filter: " + ex.Message); }
+-        Dbg("tab created, scheme filter added");
++        try { Core.AddWebResourceRequestedFilter("veil://*", CoreWebView2WebResourceContext.All); } catch (Exception ex) { D("veil filter: " + ex.Message); }
++        D("tab created, scheme filter added");
+         Wire(controller);
+         await ApplyScriptsAsync();
+ 
+@@ -239,7 +252,22 @@
+         Core.NavigationStarting += (s, e) =>
+         {
+             var uri = e.Uri;
+-            Dbg("NavigationStarting " + uri);
++            D("NavigationStarting " + uri);
++            if (IsTor)
++            {
++                // Fail closed: nothing loads unless Tor is verified and connected right now.
++                if (!win.TorAllows(uri)) { e.Cancel = true; return; }
++                if (uri.StartsWith("veil://", StringComparison.OrdinalIgnoreCase))
++                {
++                    var vh = Uri.TryCreate(uri, UriKind.Absolute, out var tu) ? tu.Host.ToLowerInvariant() : "";
++                    e.Cancel = true;
++                    Url = uri.TrimEnd('/');
++                    var page = vh == "newtab" ? TorPages.NewTab() : TorPages.Unavailable();
++                    Later(() => Core.NavigateToString(page));
++                    Raise();
++                    return;
++                }
++            }
+             if (uri.StartsWith("veil://", StringComparison.OrdinalIgnoreCase) && !uri.StartsWith("veil://insecure", StringComparison.OrdinalIgnoreCase))
+             {
+                 // Veil's own pages are drawn directly (no custom scheme needed), so they always show up.
+@@ -268,7 +296,8 @@
+                 if (cleaned != null) { e.Cancel = true; Later(() => Core.Navigate(cleaned)); return; }
+             }
+             if (uri.StartsWith("http://", StringComparison.OrdinalIgnoreCase) && Services.Settings.Bool("httpsUpgrade")
+-                && Uri.TryCreate(uri, UriKind.Absolute, out var hu) && !UrlResolver.IsLocalHost(hu.Host) && !Services.InsecureOk.Contains(hu.Host))
++                && Uri.TryCreate(uri, UriKind.Absolute, out var hu) && !UrlResolver.IsLocalHost(hu.Host) && !Services.InsecureOk.Contains(hu.Host)
++                && !(IsTor && hu.Host.EndsWith(".onion", StringComparison.OrdinalIgnoreCase)))
+             {
+                 var https = "https://" + uri.Substring(7);
+                 e.Cancel = true;
+@@ -296,7 +325,7 @@
+         Core.NavigationCompleted += (s, e) =>
+         {
+             Loading = false;
+-            Dbg("NavigationCompleted ok=" + e.IsSuccess + " status=" + e.WebErrorStatus + " source=" + Core.Source);
++            D("NavigationCompleted ok=" + e.IsSuccess + " status=" + e.WebErrorStatus + " source=" + Core.Source);
+             if (!e.IsSuccess)
+             {
+                 if (pendingUpgrade is { } up && e.WebErrorStatus != CoreWebView2WebErrorStatus.OperationCanceled)
+@@ -349,8 +378,8 @@
+         Core.IsDocumentPlayingAudioChanged += (s, e) => { Audible = Core.IsDocumentPlayingAudio; Raise(); };
+         Core.ContainsFullScreenElementChanged += (s, e) => win.SetFullscreen(Core.ContainsFullScreenElement);
+         Core.WindowCloseRequested += (s, e) => win.CloseTab(this);
+-        Core.DownloadStarting += (s, e) => Services.Downloads.Attach(e);
+-        Core.ProcessFailed += (s, e) => Dbg("ProcessFailed " + e.ProcessFailedKind + " " + e.Reason);
++        Core.DownloadStarting += (s, e) => { if (!IsTor) Services.Downloads.Attach(e); };   // Tor: WebView2's own (in-memory) download UI
++        Core.ProcessFailed += (s, e) => D("ProcessFailed " + e.ProcessFailedKind + " " + e.Reason);
+ 
+         Core.NewWindowRequested += async (s, e) =>
+         {
+@@ -368,6 +397,7 @@
+ 
+         Core.PermissionRequested += (s, e) =>
+         {
++            if (IsTor) { e.State = CoreWebView2PermissionState.Deny; return; }
+             string k = e.PermissionKind == CoreWebView2PermissionKind.Microphone ? "microphone"
+                      : e.PermissionKind == CoreWebView2PermissionKind.Camera ? "camera" : null;
+             if (k == null) return;
+@@ -382,7 +412,8 @@
+ 
+         Core.WebMessageReceived += async (s, e) =>
+         {
+-            Dbg("WebMessage from " + e.Source);
++            if (IsTor) return;      // Tor windows never talk to Veil's settings / history bridge
++            D("WebMessage from " + e.Source);
+             // Only Veil's own pages may use the bridge: either served from veil://, or drawn directly while this tab is showing a veil:// page.
+             var origin = e.Source ?? "";
+             bool ours = origin.StartsWith("veil://", StringComparison.OrdinalIgnoreCase)
+@@ -397,7 +428,7 @@
+                 var cmd = root.GetProperty("cmd").GetString();
+                 var args = root.TryGetProperty("args", out var a) ? a : default;
+                 JsonNode result = null;
+-                try { result = await Bridge.Handle(this, cmd, args); } catch (Exception bex) { Dbg("Bridge " + cmd + " failed: " + bex); }
++                try { result = await Bridge.Handle(this, cmd, args); } catch (Exception bex) { D("Bridge " + cmd + " failed: " + bex); }
+                 Core.PostWebMessageAsJson(new JsonObject { ["id"] = id, ["result"] = result }.ToJsonString());
+             }
+             catch { }
+@@ -414,9 +445,19 @@
+     void OnRequest(object sender, CoreWebView2WebResourceRequestedEventArgs e)
+     {
+         var uri = e.Request.Uri;
++        var rEnv = env ?? Services.Env;
++        if (IsTor && !win.TorUsable
++            && (uri.StartsWith("http://", StringComparison.OrdinalIgnoreCase) || uri.StartsWith("https://", StringComparison.OrdinalIgnoreCase)
++                || uri.StartsWith("ws://", StringComparison.OrdinalIgnoreCase) || uri.StartsWith("wss://", StringComparison.OrdinalIgnoreCase))
++            && !win.TorAllows(uri))
++        {
++            // Kill switch #2 (the first is the dead proxy): while Tor is not verified/connected, no subresource goes out.
++            e.Response = rEnv.CreateWebResourceResponse(null, 503, "Tor not connected", "");
++            return;
++        }
+         if (uri.StartsWith("veil://", StringComparison.OrdinalIgnoreCase))
+         {
+-            Dbg("Request " + uri);
++            D("Request " + uri);
+             string html;
+             try { html = Uri.TryCreate(uri, UriKind.Absolute, out var u) ? Pages.Html(u.Host) : null; }
+             catch (Exception ex)
+@@ -425,9 +466,9 @@
+                 html = "<!doctype html><meta charset=utf-8><body style=\"font:14px Segoe UI,sans-serif;padding:24px;color:#ddd;background:#17171a\"><h2>Veil page error</h2><pre style=\"white-space:pre-wrap\">"
+                        + Pages.Escape(ex.ToString()) + "</pre>";
+             }
+-            Dbg("Serving " + uri + " bytes=" + (html == null ? -1 : html.Length));
+-            if (html == null) { e.Response = Services.Env.CreateWebResourceResponse(null, 404, "Not Found", ""); return; }
+-            e.Response = Services.Env.CreateWebResourceResponse(new MemoryStream(Encoding.UTF8.GetBytes(html)), 200, "OK",
++            D("Serving " + uri + " bytes=" + (html == null ? -1 : html.Length));
++            if (html == null) { e.Response = rEnv.CreateWebResourceResponse(null, 404, "Not Found", ""); return; }
++            e.Response = rEnv.CreateWebResourceResponse(new MemoryStream(Encoding.UTF8.GetBytes(html)), 200, "OK",
+                 "Content-Type: text/html; charset=utf-8\r\nCache-Control: no-store\r\nContent-Security-Policy: " + Pages.Csp);
+             return;
+         }
+@@ -436,7 +477,7 @@
+         var ctx = e.ResourceContext;
+         if (ctx == CoreWebView2WebResourceContext.Document) return;
+         if (Services.Blocker.ShouldBlock(uri, UrlResolver.HostOf(Url), MapType(ctx)))
+-            e.Response = Services.Env.CreateWebResourceResponse(null, 403, "Blocked", "");
++            e.Response = rEnv.CreateWebResourceResponse(null, 403, "Blocked", "");
+     }
+ 
+     public void Dispose(Grid content)
+diff -ruN orig/veil-main/windows/Veil.Windows/App/MainWindow.Tor.cs veil-main/windows/Veil.Windows/App/MainWindow.Tor.cs
+--- orig/veil-main/windows/Veil.Windows/App/MainWindow.Tor.cs	1970-01-01 00:00:00.000000000 +0000
++++ veil-main/windows/Veil.Windows/App/MainWindow.Tor.cs	2026-11-10 13:28:37.043207199 +0000
+@@ -0,0 +1,354 @@
++using System.Text.Json;
++using System.Windows;
++using System.Windows.Controls;
++using System.Windows.Input;
++using System.Windows.Media;
++using Microsoft.Web.WebView2.Core;
++using Veil.Core;
++using Veil.Tor;
++
++namespace Veil;
++
++/// "New Tor window": the normal MainWindow running in Tor mode. Same toolbar, tab strip and theme; differences:
++///  - its own WebView2 environment + in-private profile (TorBrowserEnv), all traffic via Tor's SOCKS5 port,
++///  - no bookmarks / history / downloads list / session saving / bridge pages,
++///  - fails closed: nothing loads unless Tor is verified and currently connected.
++public sealed partial class MainWindow
++{
++    static readonly List<MainWindow> torWindows = new();
++    static readonly Brush TorPurple = Frozen(Color.FromRgb(0x7D, 0x46, 0x98));
++    static readonly Brush TorPurpleTint = Frozen(Color.FromArgb(0x30, 0x7D, 0x46, 0x98));
++    static readonly Brush DotGreen = Frozen(Color.FromRgb(0x3F, 0xB9, 0x50));
++    static readonly Brush DotAmber = Frozen(Color.FromRgb(0xE8, 0xB0, 0x58));
++    static readonly Brush DotRed = Frozen(Color.FromRgb(0xE0, 0x4F, 0x4F));
++    static Brush Frozen(Color c) { var b = new SolidColorBrush(c); b.Freeze(); return b; }
++
++    readonly bool isTor;
++    public bool IsTor => isTor;
++    public string TorProfileName { get; } = "VeilTor" + Guid.NewGuid().ToString("N").Substring(0, 12);
++
++    readonly TaskCompletionSource<CoreWebView2Environment> torEnvTcs = new(TaskCreationOptions.RunContinuationsAsynchronously);
++    public Task<CoreWebView2Environment> TorEnvTask => torEnvTcs.Task;
++    readonly CancellationTokenSource torCts = new();
++
++    bool torReady;        // verified through Tor itself AND through this window's browser: http(s) may load while Tor is connected
++    bool torVerifying;    // only check.torproject.org's API may load
++    bool torLease, torEnvHeld, torClosed, torFailed;
++    string torFailText = "";
++    Action torChangedHandler;
++
++    Border torPill, torOverlay;
++    System.Windows.Shapes.Ellipse torDot;
++    TextBlock torLabel, torOverlayTitle, torOverlayText;
++    Button torRetryBtn;
++
++    string SearchTemplate => isTor ? SearchEngines.Template("duckduckgo") : SearchEngines.Template(Services.Settings.Str("searchEngine"));
++
++    /// True only while this window may talk to the network: verified AND Tor reports Connected right now.
++    public bool TorUsable => isTor && torReady && TorManager.Instance.State == TorState.Connected;
++
++    /// Navigation gate used by every Tor tab (see BrowserTab.NavigationStarting).
++    public bool TorAllows(string uri)
++    {
++        if (!isTor) return true;
++        var low = (uri ?? "").ToLowerInvariant();
++        if (low == "about:blank" || low.StartsWith("data:") || low.StartsWith("veil://")) return true;   // local pages, no network
++        if (low.StartsWith("http://") || low.StartsWith("https://"))
++            return TorUsable || (torVerifying && uri.StartsWith(TorManager.CheckApi, StringComparison.Ordinal));
++        return false;     // file:, ftp:, edge: ... are not available in a Tor window
++    }
++
++    // ---------- opening / closing ----------
++
++    public static void OpenTorWindow()
++    {
++        if (!TorManager.IsInstalled)
++        {
++            MessageBox.Show("Tor is not included in this copy of Veil.\n\nRun windows\\scripts\\fetch_tor.ps1 and rebuild, or copy the official Tor Expert Bundle " +
++                            "into a folder named \"tor\" next to Veil.exe.", "Veil", MessageBoxButton.OK, MessageBoxImage.Information);
++            return;
++        }
++        var opener = Application.Current.Windows.OfType<MainWindow>().FirstOrDefault(x => x.IsActive) ?? Current;
++        var w = new MainWindow(null, true);
++        if (opener != null && opener.WindowState == WindowState.Normal && opener.ActualWidth > 300)
++        {
++            w.WindowStartupLocation = WindowStartupLocation.Manual;
++            w.Width = opener.ActualWidth; w.Height = opener.ActualHeight;
++            w.Left = opener.Left + 32; w.Top = opener.Top + 32;
++        }
++        else { w.Width = 1100; w.Height = 720; w.WindowStartupLocation = WindowStartupLocation.CenterScreen; }
++        torWindows.Add(w);
++        w.Closed += (s, e) => w.TorOnClosed();
++        w.Show();
++    }
++
++    static void CloseAllTorWindows()
++    {
++        foreach (var w in torWindows.ToList()) { try { w.Close(); } catch { } }
++    }
++
++    /// Runs while the window is closing: stop everything that could still touch the network and wipe cookies.
++    void TorOnClosing()
++    {
++        torClosed = true;
++        try { torCts.Cancel(); } catch { }
++        if (torChangedHandler != null) TorManager.Instance.Changed -= torChangedHandler;
++        try { tabs.Select(t => t.Core).FirstOrDefault(c => c != null)?.CookieManager.DeleteAllCookies(); } catch { }
++    }
++
++    /// Runs after the window is gone: drop the browser views, then the profile environment (deletes its folder),
++    /// then our lease on Tor (the last lease stops tor.exe).
++    async void TorOnClosed()
++    {
++        torWindows.Remove(this);
++        try { foreach (var t in tabs.ToList()) t.Dispose(content); } catch { }
++        tabs.Clear();
++        try { if (torEnvHeld) { torEnvHeld = false; await TorBrowserEnv.ReleaseAsync(); } } catch { }
++        try { if (torLease) { torLease = false; TorManager.Instance.Release(); } } catch { }
++    }
++
++    // ---------- startup ----------
++
++    async Task TorStartAsync()
++    {
++        torChangedHandler = () => Dispatcher.BeginInvoke(new Action(OnTorChanged));
++        TorManager.Instance.Changed += torChangedHandler;
++        OnServicesChanged();      // lays out the tab strip and applies the theme
++        await TorConnectAsync();
++    }
++
++    async Task TorConnectAsync()
++    {
++        torFailed = false; torFailText = "";
++        var ct = torCts.Token;
++        try
++        {
++            ShowTorOverlay("Connecting to Tor", "Starting Tor…", false);
++            if (!torLease)
++            {
++                await TorManager.Instance.AcquireAsync(ct);
++                torLease = true;
++                if (torClosed) { torLease = false; TorManager.Instance.Release(); return; }
++            }
++            await TorManager.Instance.WaitConnectedAsync(ct);
++
++            if (!torEnvHeld)
++            {
++                var env = await TorBrowserEnv.AcquireAsync(TorManager.Instance.SocksPort);
++                torEnvHeld = true;
++                if (torClosed) { torEnvHeld = false; await TorBrowserEnv.ReleaseAsync(); return; }
++                torEnvTcs.TrySetResult(env);
++            }
++
++            // Second, independent proof: load the Tor Project's check API inside THIS window's own browser engine.
++            HideTorOverlay();
++            UpdateTorPill();
++            if (!await VerifyBrowserPathAsync(ct))
++                throw new IOException("Pages in this window did not arrive through Tor (check.torproject.org says IsTor = false, or it could not be reached). " +
++                                      "The window was locked instead of falling back to a direct connection.");
++            torReady = true;
++            var first = tabs.FirstOrDefault();
++            if (first != null) first.Navigate(UrlResolver.NewTab); else NewTab();
++            if (TorManager.Instance.State != TorState.Connected) OnTorChanged(); else HideTorOverlay();
++            UpdateTorPill();
++        }
++        catch (OperationCanceledException) { }
++        catch (Exception ex)
++        {
++            torFailed = true; torFailText = ex.Message;
++            ShowTorOverlay("Could not start the Tor window", ex.Message, true);
++        }
++    }
++
++    async Task<bool> VerifyBrowserPathAsync(CancellationToken ct)
++    {
++        torVerifying = true;
++        UpdateTorPill();
++        try
++        {
++            var t = tabs.FirstOrDefault() ?? NewTab("about:blank");
++            if (t == null) return false;
++            await t.EnsureCreatedAsync(content);
++            var core = t.Core;
++            if (core == null) return false;
++
++            ulong navId = 0;
++            var tcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
++            EventHandler<CoreWebView2NavigationStartingEventArgs> started = (s, e) =>
++            {
++                if (e.Uri.StartsWith(TorManager.CheckApi, StringComparison.Ordinal)) navId = e.NavigationId;
++            };
++            EventHandler<CoreWebView2NavigationCompletedEventArgs> completed = (s, e) =>
++            {
++                if (navId != 0 && e.NavigationId == navId) tcs.TrySetResult(e.IsSuccess);
++            };
++            core.NavigationStarting += started;
++            core.NavigationCompleted += completed;
++            try
++            {
++                t.Navigate(TorManager.CheckApi);
++                var done = await Task.WhenAny(tcs.Task, Task.Delay(TimeSpan.FromSeconds(75), ct));
++                if (done != tcs.Task || !tcs.Task.Result) return false;
++                var raw = await core.ExecuteScriptAsync("document.body ? document.body.innerText : ''");
++                var text = JsonSerializer.Deserialize<string>(raw) ?? "";
++                using var doc = JsonDocument.Parse(text);
++                return doc.RootElement.TryGetProperty("IsTor", out var v) && v.ValueKind == JsonValueKind.True;
++            }
++            finally { core.NavigationStarting -= started; core.NavigationCompleted -= completed; }
++        }
++        catch (OperationCanceledException) { throw; }
++        catch { return false; }
++        finally { torVerifying = false; }
++    }
++
++    // ---------- reacting to Tor going away / coming back ----------
++
++    void OnTorChanged()
++    {
++        if (torClosed) return;
++        var m = TorManager.Instance;
++        if (!torReady)
++        {
++            if (!torFailed && !torVerifying && m.State == TorState.Starting) torOverlayText.Text = m.Detail;
++            UpdateTorPill();
++            return;
++        }
++        if (m.State == TorState.Connected)
++        {
++            if (torOverlay.Visibility == Visibility.Visible) HideTorOverlay();
++        }
++        else if (m.State == TorState.Failed)
++            ShowTorOverlay("Tor is not connected", m.Detail + "\n\nNothing loads until Tor is back. Veil never falls back to a direct connection.", true);
++        else
++            ShowTorOverlay("Tor is not connected", (m.Detail.Length > 0 ? m.Detail : "Reconnecting…") + "\n\nNothing loads until Tor is back. Veil never falls back to a direct connection.", false);
++        UpdateTorPill();
++    }
++
++    async void TorRetry()
++    {
++        if (!torReady)
++        {
++            await TorConnectAsync();       // startup or browser verification failed: run the whole sequence again
++            return;
++        }
++        ShowTorOverlay("Reconnecting to Tor", "Restarting Tor…", false);
++        await TorManager.Instance.RetryAsync();
++    }
++
++    // ---------- UI ----------
++
++    void BuildTorOverlay()
++    {
++        torOverlayTitle = new TextBlock { FontSize = 20, FontWeight = FontWeights.SemiBold, TextAlignment = TextAlignment.Center, Margin = new Thickness(0, 10, 0, 8) };
++        torOverlayText = new TextBlock { FontSize = 13, TextWrapping = TextWrapping.Wrap, TextAlignment = TextAlignment.Center, MaxWidth = 520 };
++        torOverlayTitle.SetResourceReference(TextBlock.ForegroundProperty, "Text");
++        torOverlayText.SetResourceReference(TextBlock.ForegroundProperty, "Mute");
++        torRetryBtn = new Button
++        {
++            Content = "Try again", Template = FlatTemplate, Padding = new Thickness(16, 7, 16, 7), Margin = new Thickness(0, 18, 0, 0),
++            HorizontalAlignment = HorizontalAlignment.Center, Background = TorPurpleTint, Visibility = Visibility.Collapsed, Focusable = false,
++        };
++        torRetryBtn.SetResourceReference(Control.ForegroundProperty, "Text");
++        torRetryBtn.Click += (s, e) => TorRetry();
++        var stack = new StackPanel { VerticalAlignment = VerticalAlignment.Center, HorizontalAlignment = HorizontalAlignment.Center };
++        stack.Children.Add(new TextBlock { Text = "🧅", FontFamily = new FontFamily("Segoe UI Emoji"), FontSize = 46, HorizontalAlignment = HorizontalAlignment.Center });
++        stack.Children.Add(torOverlayTitle);
++        stack.Children.Add(torOverlayText);
++        stack.Children.Add(torRetryBtn);
++        torOverlay = new Border { Child = stack, Visibility = Visibility.Collapsed, Padding = new Thickness(24) };
++        torOverlay.SetResourceReference(Border.BackgroundProperty, "Bg");
++        Panel.SetZIndex(torOverlay, 100);
++        content.Children.Add(torOverlay);
++    }
++
++    Border BuildTorPill()
++    {
++        torDot = new System.Windows.Shapes.Ellipse { Width = 8, Height = 8, Margin = new Thickness(0, 0, 6, 0), Fill = DotAmber };
++        torLabel = new TextBlock { Text = "Tor…", FontSize = 12, FontWeight = FontWeights.SemiBold, VerticalAlignment = VerticalAlignment.Center };
++        torLabel.SetResourceReference(TextBlock.ForegroundProperty, "Text");
++        var sp = new StackPanel { Orientation = Orientation.Horizontal };
++        sp.Children.Add(new TextBlock { Text = "🧅", FontFamily = new FontFamily("Segoe UI Emoji"), FontSize = 13, Margin = new Thickness(0, 0, 5, 0), VerticalAlignment = VerticalAlignment.Center });
++        sp.Children.Add(torDot);
++        sp.Children.Add(torLabel);
++        var b = new Border
++        {
++            Child = sp, CornerRadius = new CornerRadius(13), Padding = new Thickness(9, 0, 10, 0), Margin = new Thickness(2, 0, 4, 0), Height = 26,
++            Background = TorPurpleTint, BorderBrush = TorPurple, BorderThickness = new Thickness(1), Cursor = Cursors.Hand, VerticalAlignment = VerticalAlignment.Center,
++        };
++        b.MouseLeftButtonUp += (s, e) => ShowTorStatusMenu();
++        return b;
++    }
++
++    string TorStatusText()
++    {
++        if (torFailed) return "Not connected: " + torFailText;
++        if (!torReady) return torVerifying ? "Verifying that this window uses Tor…" : "Connecting to Tor…";
++        var m = TorManager.Instance;
++        return m.State == TorState.Connected ? "Connected to Tor (verified)" : "Not connected: " + m.Detail;
++    }
++
++    void UpdateTorPill()
++    {
++        if (torPill == null) return;
++        Brush dot; string label;
++        if (torFailed) { dot = DotRed; label = "Tor: error"; }
++        else if (!torReady) { dot = DotAmber; label = torVerifying ? "Tor: checking" : "Tor…"; }
++        else if (TorManager.Instance.State == TorState.Connected) { dot = DotGreen; label = "Tor"; }
++        else { dot = DotRed; label = "Tor: offline"; }
++        torDot.Fill = dot;
++        torLabel.Text = label;
++        torPill.ToolTip = TorStatusText();
++    }
++
++    void ShowTorOverlay(string title, string text, bool retry)
++    {
++        if (torOverlay == null) return;
++        torOverlayTitle.Text = title;
++        torOverlayText.Text = text;
++        torRetryBtn.Visibility = retry ? Visibility.Visible : Visibility.Collapsed;
++        torOverlay.Visibility = Visibility.Visible;
++        // WebView2 is a native child window and would draw on top of WPF content, so hide the pages while the notice is up.
++        foreach (var t in tabs) if (t.Host != null) t.Host.Visibility = Visibility.Collapsed;
++        UpdateTorPill();
++    }
++
++    void HideTorOverlay()
++    {
++        if (torOverlay == null) return;
++        torOverlay.Visibility = Visibility.Collapsed;
++        if (active != null) Activate(active);
++    }
++
++    void ApplyTorChrome()
++    {
++        // Nothing that persists or that points at the normal profile: no bookmark star, ad-block allow-list shield or downloads list.
++        starB.Visibility = shieldB.Visibility = dlB.Visibility = Visibility.Collapsed;
++        bookmarksWrap.Visibility = Visibility.Collapsed;
++        UpdateTorPill();
++    }
++
++    void ShowTorStatusMenu()
++    {
++        VeilMenu.Show(torPill, new[]
++        {
++            MenuEntry.Item(TorStatusText(), () => { }, "", false),
++            MenuEntry.Sep(),
++            MenuEntry.Item("Check Tor connection", () => NewTab("https://check.torproject.org/"), "", TorUsable),
++            MenuEntry.Item("Try again", () => TorRetry(), "", torFailed || (torReady && TorManager.Instance.State != TorState.Connected)),
++        }, rightAlign: true);
++    }
++
++    void ShowTorMenu()
++    {
++        VeilMenu.Show(menuB, new[]
++        {
++            MenuEntry.Item("New tab", () => NewTab(), "Ctrl+T"),
++            MenuEntry.Item("New Tor window", () => OpenTorWindow(), "Alt+Shift+N"),
++            MenuEntry.Sep(),
++            MenuEntry.Item("Check Tor connection", () => NewTab("https://check.torproject.org/"), "", TorUsable),
++            MenuEntry.Item("Full screen", () => SetFullscreen(!fullscreen), "F11"),
++            MenuEntry.Sep(),
++            MenuEntry.Item("Close Tor window", () => Close()),
++        }, rightAlign: true);
++    }
++}
+diff -ruN orig/veil-main/windows/Veil.Windows/App/MainWindow.cs veil-main/windows/Veil.Windows/App/MainWindow.cs
+--- orig/veil-main/windows/Veil.Windows/App/MainWindow.cs	2026-11-10 06:25:14.000000000 +0000
++++ veil-main/windows/Veil.Windows/App/MainWindow.cs	2026-11-10 07:16:38.912531883 +0000
+@@ -6,6 +6,7 @@
+ using System.Windows.Media;
+ using Microsoft.Web.WebView2.Core;
+ using Veil.Core;
++using Veil.Tor;
+ 
+ namespace Veil;
+ 
+@@ -96,9 +97,9 @@
+     }
+ }
+ 
+-public sealed class MainWindow : Window
++public sealed partial class MainWindow : Window
+ {
+-    public static MainWindow Current;
++    public static MainWindow Current;     // the normal main window (never a Tor window)
+ 
+     sealed class Parts { public Image Fav; public TextBlock Title; public Button Audio, Close; }
+ 
+@@ -128,11 +129,12 @@
+     readonly Grid rootGrid = new();
+     bool fullscreen; WindowState prevState; WindowStyle prevStyle;
+ 
+-    public MainWindow(string startUrl)
++    public MainWindow(string startUrl, bool tor = false)
+     {
+-        Current = this;
++        isTor = tor;
++        if (!isTor) Current = this;       // Bridge and external links always talk to the normal window
+         startupUrl = startUrl;
+-        Title = "Veil";
++        Title = isTor ? "Veil (Tor)" : "Veil";
+         MinWidth = 520; MinHeight = 360;
+         Theme.Apply();
+         SetResourceReference(BackgroundProperty, "Bg");
+@@ -171,6 +173,7 @@
+ 
+         Grid.SetRow(content, 3); chrome.Children.Add(content);
+         Content = rootGrid;
++        if (isTor) BuildTorOverlay();
+ 
+         PreviewKeyDown += (s, e) =>
+         {
+@@ -178,7 +181,9 @@
+             var m = Keyboard.Modifiers;
+             if (HandleShortcut(k, m.HasFlag(ModifierKeys.Control), m.HasFlag(ModifierKeys.Shift), m.HasFlag(ModifierKeys.Alt))) e.Handled = true;
+         };
+-        Services.Changed += () => Dispatcher.BeginInvoke(new Action(OnServicesChanged));
++        Action onServicesChanged = () => Dispatcher.BeginInvoke(new Action(OnServicesChanged));
++        Services.Changed += onServicesChanged;
++        Closed += (s, e) => { Services.Changed -= onServicesChanged; idleTimer.Stop(); cookieTimer.Stop(); };
+         SourceInitialized += (s, e) => ApplyTitleBar();
+         PreviewMouseDown += (s, e) =>
+         {
+@@ -190,7 +195,7 @@
+         idleTimer.Start();
+         cookieTimer.Tick += (_, __) => _ = KeepSessionCookiesAsync();
+         cookieTimer.Start();
+-        Loaded += async (s, e) => await StartAsync();
++        Loaded += async (s, e) => { if (isTor) await TorStartAsync(); else await StartAsync(); };
+         Closing += OnClosing;
+     }
+ 
+@@ -311,7 +316,7 @@
+         {
+             if (e.Key == Key.Enter)
+             {
+-                var url = UrlResolver.Resolve(address.Text, SearchEngines.Template(Services.Settings.Str("searchEngine")));
++                var url = UrlResolver.Resolve(address.Text, SearchTemplate);
+                 active?.Navigate(url);
+                 active?.FocusPage();
+                 e.Handled = true;
+@@ -325,6 +330,13 @@
+         var dock = new DockPanel { Margin = new Thickness(6, 4, 6, 6) };
+         foreach (var b in new[] { backB, fwdB, reloadB }) { DockPanel.SetDock(b, Dock.Left); dock.Children.Add(b); }
+         foreach (var b in new[] { menuB, dlB, shieldB, starB }) { DockPanel.SetDock(b, Dock.Right); dock.Children.Add(b); }
++        if (isTor)
++        {
++            torPill = BuildTorPill();
++            DockPanel.SetDock(torPill, Dock.Right);
++            dock.Children.Add(torPill);
++            field.BorderBrush = TorPurple;     // purple address bar: this is the Tor window
++        }
+         dock.Children.Add(field);
+         var wrap = new Border { Child = dock };
+         wrap.SetResourceReference(Border.BackgroundProperty, "Bar");
+@@ -333,10 +345,12 @@
+ 
+     void ShowMainMenu()
+     {
++        if (isTor) { ShowTorMenu(); return; }
+         VeilMenu.Show(menuB, new[]
+         {
+             MenuEntry.Item("New tab", () => NewTab(), "Ctrl+T"),
+             MenuEntry.Item("New private tab", () => NewTab(null, true), "Ctrl+Shift+N"),
++            MenuEntry.Item("New Tor window", () => OpenTorWindow(), "Alt+Shift+N"),
+             MenuEntry.Sep(),
+             MenuEntry.Item("History", () => OpenInternal("veil://history"), "Ctrl+H"),
+             MenuEntry.Item("Bookmarks", () => OpenInternal("veil://bookmarks")),
+@@ -420,6 +434,7 @@
+     // ---------- tabs ----------
+     public void OpenInternal(string url)
+     {
++        if (isTor) return;      // history, settings, downloads ... belong to the normal windows
+         var existing = tabs.FirstOrDefault(t => t.Url == url && !t.IsPrivate);
+         if (existing != null) { Activate(existing); return; }
+         if (active != null && active.Url == UrlResolver.NewTab) active.Navigate(url); else NewTab(url);
+@@ -427,7 +442,8 @@
+ 
+     public BrowserTab NewTab(string url = null, bool isPrivate = false, bool activate = true)
+     {
+-        var t = new BrowserTab(this, isPrivate) { Url = url ?? UrlResolver.NewTab };
++        if (isTor && !torReady && !torVerifying) return null;     // no tabs until Tor is verified
++        var t = new BrowserTab(this, isPrivate || isTor) { Url = url ?? UrlResolver.NewTab };
+         t.PendingUrl = t.Url;
+         t.Header = MakeHeader(t);
+         t.Changed += () => Refresh(t);
+@@ -532,7 +548,7 @@
+     {
+         if (t.Header == null) return;
+         var p = (Parts)t.Header.Tag;
+-        p.Title.Text = (t.IsPrivate ? "🕶 " : "") + t.DisplayTitle;
++        p.Title.Text = (isTor ? "🧅 " : t.IsPrivate ? "🕶 " : "") + t.DisplayTitle;
+         p.Fav.Source = t.Favicon;
+         p.Audio.Content = t.Muted ? "\uE74F" : "\uE767";
+         p.Audio.Visibility = t.Audible || t.Muted ? Visibility.Visible : Visibility.Collapsed;
+@@ -554,7 +570,7 @@
+         starB.SetResourceReference(Control.ForegroundProperty, web && Services.Bookmarks.Contains(active.Url) ? "Accent" : "Text");
+         var host = UrlResolver.HostOf(active.Url);
+         shieldB.Opacity = web && Services.Allowlist.Contains(host) ? 0.35 : 1.0;
+-        Title = active.DisplayTitle + (active.IsPrivate ? " (Private)" : "") + " – Veil";
++        Title = active.DisplayTitle + (isTor ? " (Tor)" : active.IsPrivate ? " (Private)" : "") + " – Veil";
+     }
+ 
+     // ---------- settings-driven chrome ----------
+@@ -588,6 +604,7 @@
+         RebuildBookmarks();
+         foreach (var t in tabs) { _ = t.ApplyScriptsAsync(); Refresh(t); }
+         UpdateChrome(false);
++        if (isTor) ApplyTorChrome();
+     }
+ 
+     // ---------- settings that need a little native help ----------
+@@ -712,6 +729,7 @@
+     void RebuildBookmarks()
+     {
+         bookmarksBar.Children.Clear();
++        if (isTor) { bookmarksWrap.Visibility = Visibility.Collapsed; return; }     // also keeps favicon fetches off the direct network
+         bool show = Services.Settings.Bool("showBookmarksBar") && Services.Bookmarks.All.Count > 0;
+         bookmarksWrap.Visibility = show ? Visibility.Visible : Visibility.Collapsed;
+         if (!show) return;
+@@ -755,7 +773,7 @@
+                 case Key.W: if (active != null) CloseTab(active); return true;
+                 case Key.N when shift: NewTab(null, true); return true;
+                 case Key.L: address.Focus(); address.SelectAll(); return true;
+-                case Key.D: ToggleBookmark(); return true;
++                case Key.D: if (!isTor) ToggleBookmark(); return true;
+                 case Key.R: active?.Reload(); return true;
+                 case Key.Tab: Cycle(shift ? -1 : 1); return true;
+                 case Key.PageDown: Cycle(1); return true;
+@@ -772,6 +790,7 @@
+         {
+             switch (key)
+             {
++                case Key.N when shift: OpenTorWindow(); return true;     // Ctrl+Shift+N is taken by "New private tab"
+                 case Key.Left: active?.GoBack(); return true;
+                 case Key.Right: active?.GoForward(); return true;
+                 case Key.D: address.Focus(); address.SelectAll(); return true;
+@@ -824,7 +843,7 @@
+     // ---------- persistence ----------
+     void SaveSession()
+     {
+-        if (tabs.Count == 0) return;
++        if (isTor || tabs.Count == 0) return;     // a Tor window must never overwrite the normal session
+         var s = new SessionState();
+         foreach (var t in tabs.Where(t => !t.IsPrivate && t.Url.Length > 0))
+         {
+@@ -836,10 +855,12 @@
+ 
+     void OnClosing(object sender, System.ComponentModel.CancelEventArgs e)
+     {
++        if (isTor) { TorOnClosing(); return; }
+         if (Services.Settings.Bool("confirmCloseWindow") || (Services.Settings.Bool("confirmQuit")))
+             if (MessageBox.Show("Close Veil?", "Veil", MessageBoxButton.YesNo, MessageBoxImage.Question) != MessageBoxResult.Yes) { e.Cancel = true; return; }
+         if (Services.Downloads.HasActive &&
+             MessageBox.Show("A download is still running. Quit anyway?", "Veil", MessageBoxButton.YesNo, MessageBoxImage.Warning) != MessageBoxResult.Yes) { e.Cancel = true; return; }
++        CloseAllTorWindows();       // the app exits with this window; Tor windows go first so their data is wiped
+         SaveSession();
+         var rb = RestoreBounds;
+         Services.Window.Value = new WindowBounds { Left = rb.Left, Top = rb.Top, Width = rb.Width, Height = rb.Height, Maximized = WindowState == WindowState.Maximized };
+diff -ruN orig/veil-main/windows/Veil.Windows/App/Program.cs veil-main/windows/Veil.Windows/App/Program.cs
+--- orig/veil-main/windows/Veil.Windows/App/Program.cs	2026-11-10 06:25:14.000000000 +0000
++++ veil-main/windows/Veil.Windows/App/Program.cs	2026-11-10 07:19:07.760125936 +0000
+@@ -52,7 +52,14 @@
+         }
+ 
+         Services.Init();
++        Task.Run(() => Veil.Tor.TorBrowserEnv.CleanStale(null));     // leftovers of a Tor window that was killed
+         var app = new Application { ShutdownMode = ShutdownMode.OnMainWindowClose };
++        app.Exit += (s, e) =>
++        {
++            // Tor windows are closed with the main window; make sure tor.exe is gone and no Tor session data is left behind.
++            Veil.Tor.TorManager.Instance.Shutdown();
++            Veil.Tor.TorBrowserEnv.DeleteAllNow();
++        };
+         app.DispatcherUnhandledException += (s, e) =>
+         {
+             Report("Error", e.Exception);
+diff -ruN orig/veil-main/windows/Veil.Windows/App/Tor/TorBrowserEnv.cs veil-main/windows/Veil.Windows/App/Tor/TorBrowserEnv.cs
+--- orig/veil-main/windows/Veil.Windows/App/Tor/TorBrowserEnv.cs	1970-01-01 00:00:00.000000000 +0000
++++ veil-main/windows/Veil.Windows/App/Tor/TorBrowserEnv.cs	2026-11-10 13:28:37.043688348 +0000
+@@ -0,0 +1,126 @@
++using Microsoft.Web.WebView2.Core;
++
++namespace Veil.Tor;
++
++/// The WebView2 environment used by every Tor window. It is completely separate from Services.Env:
++///  - its own throw-away user-data folder (deleted when the last Tor window closes, and swept at the next start),
++///  - its own browser process, launched with Chromium switches that force ALL of its network traffic through Tor.
++/// Reference counted; one environment is shared by all open Tor windows, each window has its own in-private profile.
++public static class TorBrowserEnv
++{
++    static readonly SemaphoreSlim gate = new(1, 1);
++    static CoreWebView2Environment env;
++    static string folder;
++    static int refs, port;
++
++    public static string Root
++    {
++        get
++        {
++            var d = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Veil", "TorSession");
++            Directory.CreateDirectory(d);
++            return d;
++        }
++    }
++
++    /// Chromium switches for the Tor browser process. Each one is a layer of the "no leaks" design:
++    ///  --proxy-server            every request goes to Tor's SOCKS5 port; if it is down the request FAILS (no DIRECT fallback)
++    ///  --proxy-bypass-list       "<-loopback>" removes Chromium's implicit "localhost goes direct" rule
++    ///  --host-resolver-rules     any lookup Chromium would do itself fails; with socks5:// the proxy resolves names (via Tor)
++    ///  --disable-quic            QUIC/HTTP3 is UDP and cannot be proxied
++    ///  --force-webrtc-ip-handling-policy  WebRTC may not use UDP outside the proxy (no local/public IP leak)
++    public static string BuildArguments(int socksPort) => string.Join(" ", new[]
++    {
++        "--proxy-server=\"socks5://127.0.0.1:" + socksPort + "\"",
++        "--proxy-bypass-list=<-loopback>",
++        "--host-resolver-rules=\"MAP * ~NOTFOUND , EXCLUDE 127.0.0.1\"",
++        "--disable-quic",
++        "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
++        "--no-pings",
++        "--disable-background-networking",
++    });
++
++    public static async Task<CoreWebView2Environment> AcquireAsync(int socksPort)
++    {
++        await gate.WaitAsync();
++        try
++        {
++            if (env != null)
++            {
++                if (port != socksPort) throw new InvalidOperationException("Tor's SOCKS port changed while Tor windows were open.");
++                refs++;
++                return env;
++            }
++            CleanStale(null);
++            var dir = System.IO.Path.Combine(Root, Guid.NewGuid().ToString("N"));
++            Directory.CreateDirectory(dir);
++            var opts = new CoreWebView2EnvironmentOptions { AdditionalBrowserArguments = BuildArguments(socksPort) };
++            var reg = new CoreWebView2CustomSchemeRegistration("veil") { TreatAsSecure = true, HasAuthorityComponent = true };
++            if (opts.CustomSchemeRegistrations != null) opts.CustomSchemeRegistrations.Add(reg);
++            else
++            {
++                var prop = typeof(CoreWebView2EnvironmentOptions).GetProperty("CustomSchemeRegistrations");
++                if (prop != null && prop.CanWrite) prop.SetValue(opts, new List<CoreWebView2CustomSchemeRegistration> { reg });
++            }
++            env = await CoreWebView2Environment.CreateAsync(null, dir, opts);
++            folder = dir; port = socksPort; refs = 1;
++            return env;
++        }
++        finally { gate.Release(); }
++    }
++
++    /// Called when a Tor window has closed its tabs. The last release drops the environment and deletes the folder.
++    public static async Task ReleaseAsync()
++    {
++        string toDelete;
++        await gate.WaitAsync();
++        try
++        {
++            if (env == null) return;
++            if (--refs > 0) return;
++            toDelete = folder;
++            env = null; folder = null; port = 0;
++        }
++        finally { gate.Release(); }
++
++        // The browser process exits once every WebView2 object is released; its files stay locked until then.
++        GC.Collect(); GC.WaitForPendingFinalizers();
++        _ = Task.Run(async () =>
++        {
++            for (int i = 0; i < 40; i++)
++            {
++                try { if (!Directory.Exists(toDelete)) return; Directory.Delete(toDelete, true); return; }
++                catch { await Task.Delay(1500); if (i % 5 == 4) { GC.Collect(); GC.WaitForPendingFinalizers(); } }
++            }
++        });
++    }
++
++    /// Deletes leftover session folders (crash, forced quit). Called at startup and before a new environment is made.
++    public static void CleanStale(string keep)
++    {
++        try
++        {
++            foreach (var d in Directory.EnumerateDirectories(Root))
++            {
++                if (keep != null && string.Equals(d, keep, StringComparison.OrdinalIgnoreCase)) continue;
++                if (string.Equals(d, folder, StringComparison.OrdinalIgnoreCase)) continue;
++                try { Directory.Delete(d, true); } catch { }
++            }
++        }
++        catch { }
++    }
++
++    /// Synchronous best effort at application exit.
++    public static void DeleteAllNow()
++    {
++        for (int i = 0; i < 6; i++)
++        {
++            try
++            {
++                foreach (var d in Directory.EnumerateDirectories(Root)) Directory.Delete(d, true);
++                return;
++            }
++            catch { Thread.Sleep(500); }
++        }
++    }
++}
+diff -ruN orig/veil-main/windows/Veil.Windows/App/Tor/TorControl.cs veil-main/windows/Veil.Windows/App/Tor/TorControl.cs
+--- orig/veil-main/windows/Veil.Windows/App/Tor/TorControl.cs	1970-01-01 00:00:00.000000000 +0000
++++ veil-main/windows/Veil.Windows/App/Tor/TorControl.cs	2026-11-10 07:14:33.839909585 +0000
+@@ -0,0 +1,103 @@
++using System.Net;
++using System.Net.Sockets;
++using System.Text;
++
++namespace Veil.Tor;
++
++/// Minimal client for Tor's control protocol (https://spec.torproject.org/control-spec/).
++/// Only what Veil needs: cookie authentication, GETINFO and SIGNAL. Commands are serialised.
++public sealed class TorControl : IDisposable
++{
++    readonly TcpClient tcp = new();
++    readonly SemaphoreSlim gate = new(1, 1);
++    StreamReader reader;
++    StreamWriter writer;
++
++    /// Connects to 127.0.0.1:port and authenticates with the cookie file Tor writes into its data directory.
++    public static async Task<TorControl> ConnectAsync(int port, string cookieFile, Func<bool> processExited, CancellationToken ct)
++    {
++        var deadline = DateTime.UtcNow.AddSeconds(30);
++        Exception last = null;
++        while (DateTime.UtcNow < deadline)
++        {
++            ct.ThrowIfCancellationRequested();
++            if (processExited()) throw new IOException("Tor exited before it could be controlled.");
++            TorControl c = null;
++            try
++            {
++                if (!File.Exists(cookieFile)) throw new FileNotFoundException("Tor has not written its control cookie yet.");
++                var cookie = File.ReadAllBytes(cookieFile);
++                if (cookie.Length != 32) throw new IOException("Control cookie is incomplete.");
++                c = new TorControl();
++                await c.tcp.ConnectAsync(IPAddress.Loopback, port, ct);
++                var ns = c.tcp.GetStream();
++                c.reader = new StreamReader(ns, new UTF8Encoding(false));
++                c.writer = new StreamWriter(ns, new UTF8Encoding(false)) { NewLine = "\r\n", AutoFlush = true };
++                await c.SendAsync("AUTHENTICATE " + Convert.ToHexString(cookie), ct);
++                return c;
++            }
++            catch (OperationCanceledException) { c?.Dispose(); throw; }
++            catch (Exception ex)
++            {
++                last = ex;
++                c?.Dispose();
++                await Task.Delay(300, ct);
++            }
++        }
++        throw new IOException("Could not connect to Tor's control port: " + last?.Message);
++    }
++
++    /// Sends one command and returns the reply lines (without the status codes and without the final "OK").
++    /// Throws if Tor answers with an error status.
++    public async Task<List<string>> SendAsync(string command, CancellationToken ct = default)
++    {
++        await gate.WaitAsync(ct);
++        try
++        {
++            using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
++            cts.CancelAfter(TimeSpan.FromSeconds(15));
++            await writer.WriteLineAsync(command);
++            var lines = new List<string>();
++            while (true)
++            {
++                var line = await reader.ReadLineAsync(cts.Token) ?? throw new IOException("Tor's control connection was closed.");
++                if (line.Length < 4) continue;
++                var code = line.Substring(0, 3);
++                var sep = line[3];
++                var body = line.Substring(4);
++                if (sep == '+')
++                {
++                    // multi-line data reply, terminated by a line containing a single "."
++                    var sb = new StringBuilder(body).Append('\n');
++                    while (true)
++                    {
++                        var d = await reader.ReadLineAsync(cts.Token) ?? throw new IOException("Tor's control connection was closed.");
++                        if (d == ".") break;
++                        sb.Append(d).Append('\n');
++                    }
++                    lines.Add(sb.ToString());
++                    continue;
++                }
++                if (code[0] == '6') continue;                 // asynchronous event: we never subscribe, ignore defensively
++                if (sep == '-') { lines.Add(body); continue; }
++                if (code != "250") throw new IOException("Tor control error " + code + ": " + body);
++                return lines;                                  // "250 OK"
++            }
++        }
++        finally { gate.Release(); }
++    }
++
++    public async Task<string> GetInfoAsync(string key, CancellationToken ct = default)
++    {
++        var lines = await SendAsync("GETINFO " + key, ct);
++        var prefix = key + "=";
++        foreach (var l in lines)
++            if (l.StartsWith(prefix, StringComparison.Ordinal)) return l.Substring(prefix.Length);
++        throw new IOException("Tor did not answer GETINFO " + key + ".");
++    }
++
++    public void Dispose()
++    {
++        try { tcp.Dispose(); } catch { }
++    }
++}
+diff -ruN orig/veil-main/windows/Veil.Windows/App/Tor/TorManager.cs veil-main/windows/Veil.Windows/App/Tor/TorManager.cs
+--- orig/veil-main/windows/Veil.Windows/App/Tor/TorManager.cs	1970-01-01 00:00:00.000000000 +0000
++++ veil-main/windows/Veil.Windows/App/Tor/TorManager.cs	2026-11-10 07:19:07.759106740 +0000
+@@ -0,0 +1,421 @@
++using System.Diagnostics;
++using System.Net;
++using System.Net.Sockets;
++using System.Text;
++using System.Text.Json;
++using System.Text.RegularExpressions;
++
++namespace Veil.Tor;
++
++public enum TorState { Stopped, Starting, Connected, Disconnected, Failed }
++
++/// Owns the one tor.exe process shared by all Tor windows (reference counted: started with the first Tor window,
++/// stopped when the last one closes). Tor itself is the unmodified, official binary from the Tor Expert Bundle.
++///
++/// "Connected" is only ever reported after:
++///   1. Tor reports bootstrap 100% and an established circuit (control port), and
++///   2. check.torproject.org, reached *through Tor's SOCKS port*, says IsTor = true.
++public sealed class TorManager
++{
++    public static readonly TorManager Instance = new();
++    TorManager() { }
++
++    public const string CheckApi = "https://check.torproject.org/api/ip";
++
++    readonly object sync = new();
++    readonly SemaphoreSlim gate = new(1, 1);
++    readonly CancellationTokenSource lifetime = new();
++    TorState state = TorState.Stopped;
++    int progress, socksPort, leases;
++    string detail = "";
++    bool stopping;
++    Process proc;
++    TorControl ctl;
++    CancellationTokenSource monitorCts;
++
++    /// Raised on a background thread. Subscribers must marshal to the UI thread themselves.
++    public event Action Changed;
++
++    public TorState State { get { lock (sync) return state; } }
++    public int Progress { get { lock (sync) return progress; } }
++    public string Detail { get { lock (sync) return detail; } }
++    public int SocksPort { get { lock (sync) return socksPort; } }
++
++    // ---------- locations ----------
++    static string BaseDir => System.IO.Path.GetDirectoryName(Environment.ProcessPath ?? "") ?? AppContext.BaseDirectory;
++
++    static string foundRoot;
++
++    public static string FindTorExe()
++    {
++        foreach (var root in new[] { System.IO.Path.Combine(AppContext.BaseDirectory, "tor"), System.IO.Path.Combine(BaseDir, "tor") })
++        {
++            try
++            {
++                if (!Directory.Exists(root)) continue;
++                var exe = Directory.EnumerateFiles(root, "tor.exe", SearchOption.AllDirectories).FirstOrDefault();
++                if (exe != null) { foundRoot = root; return exe; }
++            }
++            catch { }
++        }
++        return null;
++    }
++
++    public static bool IsInstalled => FindTorExe() != null;
++
++    static string TorRoot
++    {
++        get
++        {
++            var d = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Veil", "Tor");
++            Directory.CreateDirectory(d);
++            return d;
++        }
++    }
++
++    static string Log(string msg)
++    {
++        try { File.AppendAllText(System.IO.Path.Combine(TorRoot, "veil-tor.log"), DateTime.Now.ToString("HH:mm:ss ") + msg + "\n"); } catch { }
++        return msg;
++    }
++
++    // ---------- public API ----------
++
++    /// Starts Tor if needed, waits until it is bootstrapped AND verified, and takes a lease. Returns the SOCKS port.
++    /// Every successful call must be paired with Release().
++    public async Task<int> AcquireAsync(CancellationToken ct)
++    {
++        await gate.WaitAsync(ct);
++        try
++        {
++            bool join;
++            lock (sync) join = leases > 0 && state != TorState.Failed;
++            if (!join)
++            {
++                try { await StartLockedAsync(ct); }
++                catch
++                {
++                    bool unused; lock (sync) unused = leases == 0;
++                    if (unused) await StopLockedAsync();
++                    throw;
++                }
++                if (ct.IsCancellationRequested)
++                {
++                    bool unused; lock (sync) unused = leases == 0;
++                    if (unused) await StopLockedAsync();
++                    ct.ThrowIfCancellationRequested();
++                }
++            }
++            lock (sync) { leases++; return socksPort; }
++        }
++        finally { gate.Release(); }
++    }
++
++    /// Waits until the state is Connected (used by windows that joined an already running Tor).
++    public async Task WaitConnectedAsync(CancellationToken ct)
++    {
++        var deadline = DateTime.UtcNow.AddSeconds(150);
++        while (true)
++        {
++            ct.ThrowIfCancellationRequested();
++            var s = State;
++            if (s == TorState.Connected) return;
++            if (s == TorState.Failed || s == TorState.Stopped) throw new IOException(Detail.Length > 0 ? Detail : "Tor is not running.");
++            if (DateTime.UtcNow > deadline) throw new TimeoutException("Timed out waiting for Tor.");
++            await Task.Delay(400, ct);
++        }
++    }
++
++    /// Gives a lease back; the last one stops Tor.
++    public void Release()
++    {
++        bool last;
++        lock (sync) { if (leases > 0) leases--; last = leases == 0; }
++        if (last) _ = Task.Run(async () =>
++        {
++            await gate.WaitAsync();
++            try
++            {
++                bool still; lock (sync) still = leases > 0;
++                if (!still) await StopLockedAsync();
++            }
++            finally { gate.Release(); }
++        });
++    }
++
++    /// "Retry" button: restart Tor after a failure.
++    public async Task RetryAsync()
++    {
++        await gate.WaitAsync();
++        try { await StartLockedAsync(lifetime.Token); }
++        catch (Exception ex) { Log("Retry failed: " + ex.Message); }
++        finally { gate.Release(); }
++    }
++
++    /// Synchronous hard stop used when Veil exits.
++    public void Shutdown()
++    {
++        stopping = true;
++        try { lifetime.Cancel(); } catch { }
++        try { monitorCts?.Cancel(); } catch { }
++        try { if (proc != null && !proc.HasExited) proc.Kill(true); } catch { }
++        try { ctl?.Dispose(); } catch { }
++    }
++
++    // ---------- start / stop ----------
++
++    void Set(TorState s, int pct, string text)
++    {
++        lock (sync) { state = s; progress = pct; detail = text ?? ""; }
++        try { Changed?.Invoke(); } catch { }
++    }
++
++    static int FreePort()
++    {
++        var l = new TcpListener(IPAddress.Loopback, 0);
++        l.Start();
++        int p = ((IPEndPoint)l.LocalEndpoint).Port;
++        l.Stop();
++        return p;
++    }
++
++    static string Q(string path) => "\"" + path.Replace('\\', '/') + "\"";
++
++    async Task StartLockedAsync(CancellationToken ct)
++    {
++        var exe = FindTorExe() ?? throw new FileNotFoundException(
++            "tor.exe was not found next to Veil. Run windows\\scripts\\fetch_tor.ps1 and rebuild (see windows\\README.md).");
++        Set(TorState.Starting, 0, "Starting Tor…");
++        try
++        {
++            try { monitorCts?.Cancel(); } catch { }
++            KillProcess();
++            stopping = false;
++
++            var root = TorRoot;
++            var dataDir = System.IO.Path.Combine(root, "data");
++            var runDir = System.IO.Path.Combine(root, "run");
++            Directory.CreateDirectory(dataDir);
++            Directory.CreateDirectory(runDir);
++
++            int port;
++            lock (sync) { if (leases == 0 || socksPort == 0) socksPort = FreePort(); port = socksPort; }
++            int ctlPort; do { ctlPort = FreePort(); } while (ctlPort == port);
++
++            var cookie = System.IO.Path.Combine(runDir, "control_auth_cookie");
++            try { File.Delete(cookie); } catch { }
++            var torLog = System.IO.Path.Combine(runDir, "tor.log");
++            try { File.Delete(torLog); } catch { }
++            var torrc = System.IO.Path.Combine(runDir, "torrc");
++
++            var rc = new StringBuilder();
++            rc.AppendLine("DataDirectory " + Q(dataDir));
++            rc.AppendLine("SocksPort 127.0.0.1:" + port);            // loopback only
++            rc.AppendLine("ControlPort 127.0.0.1:" + ctlPort);        // loopback only
++            rc.AppendLine("CookieAuthentication 1");
++            rc.AppendLine("CookieAuthFile " + Q(cookie));
++            rc.AppendLine("ClientOnly 1");
++            rc.AppendLine("AvoidDiskWrites 1");
++            rc.AppendLine("SafeLogging 1");
++            rc.AppendLine("Log notice file " + Q(torLog));
++            rc.AppendLine("__OwningControllerProcess " + Environment.ProcessId);   // Tor exits by itself if Veil dies
++            var torDir = System.IO.Path.GetDirectoryName(exe);
++            // geoip data is optional for a client; use it if the bundle ships it (somewhere below the "tor" folder).
++            if (foundRoot != null)
++            {
++                foreach (var geo in new[] { "geoip", "geoip6" })
++                {
++                    var f = Directory.EnumerateFiles(foundRoot, geo, SearchOption.AllDirectories).FirstOrDefault();
++                    if (f != null) rc.AppendLine((geo == "geoip" ? "GeoIPFile " : "GeoIPv6File ") + Q(f));
++                }
++            }
++            File.WriteAllText(torrc, rc.ToString());
++
++            var psi = new ProcessStartInfo(exe)
++            {
++                UseShellExecute = false, CreateNoWindow = true, WorkingDirectory = torDir,
++            };
++            psi.ArgumentList.Add("-f");
++            psi.ArgumentList.Add(torrc);
++            var p = Process.Start(psi) ?? throw new IOException("Could not start tor.exe.");
++            p.EnableRaisingEvents = true;
++            p.Exited += (s, e) => Log("tor.exe exited with code " + SafeExit(p));
++            proc = p;
++            Log("tor.exe started, pid " + p.Id + ", socks " + port);
++
++            ctl?.Dispose();
++            ctl = await TorControl.ConnectAsync(ctlPort, cookie, () => p.HasExited, ct);
++
++            // 1. wait for bootstrap = 100%
++            var deadline = DateTime.UtcNow.AddSeconds(120);
++            while (true)
++            {
++                ct.ThrowIfCancellationRequested();
++                if (p.HasExited) throw new IOException("Tor stopped while connecting (see " + torLog + ").");
++                var phase = await ctl.GetInfoAsync("status/bootstrap-phase", ct);
++                var m = Regex.Match(phase, @"PROGRESS=(\d+)");
++                int pct = m.Success ? int.Parse(m.Groups[1].Value) : 0;
++                var sm = Regex.Match(phase, "SUMMARY=\"([^\"]*)\"");
++                Set(TorState.Starting, pct, "Connecting to the Tor network… " + pct + "%" + (sm.Success ? " (" + sm.Groups[1].Value + ")" : ""));
++                if (pct >= 100) break;
++                if (DateTime.UtcNow > deadline) throw new TimeoutException("Tor did not finish connecting within two minutes. Your network may be blocking Tor.");
++                await Task.Delay(500, ct);
++            }
++
++            // 2. a circuit must actually exist
++            for (int i = 0; ; i++)
++            {
++                ct.ThrowIfCancellationRequested();
++                if ((await ctl.GetInfoAsync("status/circuit-established", ct)).Trim() == "1") break;
++                if (i > 60) throw new TimeoutException("Tor could not build a circuit.");
++                await Task.Delay(500, ct);
++            }
++
++            // 3. independent end-to-end check through the SOCKS port
++            Set(TorState.Starting, 100, "Verifying the Tor connection…");
++            var (isTor, _) = await VerifyAsync(port, ct);
++            if (!isTor) throw new IOException("check.torproject.org says traffic through Tor's SOCKS port is NOT using Tor. Refusing to continue.");
++
++            Set(TorState.Connected, 100, "Connected to Tor");
++            StartMonitor();
++        }
++        catch (OperationCanceledException)
++        {
++            KillProcess();
++            Set(TorState.Stopped, 0, "");
++            throw;
++        }
++        catch (Exception ex)
++        {
++            Log("start failed: " + ex.Message);
++            KillProcess();
++            Set(TorState.Failed, 0, ex.Message);
++            throw;
++        }
++    }
++
++    static string SafeExit(Process p) { try { return p.ExitCode.ToString(); } catch { return "?"; } }
++
++    void KillProcess()
++    {
++        try { ctl?.Dispose(); } catch { }
++        ctl = null;
++        var p = proc;
++        proc = null;
++        if (p == null) return;
++        stopping = true;
++        try { if (!p.HasExited) p.Kill(true); } catch { }
++        try { p.WaitForExit(2000); } catch { }
++        try { p.Dispose(); } catch { }
++    }
++
++    async Task StopLockedAsync()
++    {
++        stopping = true;
++        try { monitorCts?.Cancel(); } catch { }
++        try { if (ctl != null) await ctl.SendAsync("SIGNAL HALT"); } catch { }
++        try { if (proc != null) await Task.Run(() => proc.WaitForExit(1500)); } catch { }
++        KillProcess();
++        lock (sync) { socksPort = 0; }
++        Set(TorState.Stopped, 0, "");
++    }
++
++    // ---------- verification ----------
++
++    /// Asks the Tor Project's own check service, through the given SOCKS port, whether the request arrived via Tor.
++    /// .NET's SOCKS5 support sends the host name to the proxy (no local DNS lookup).
++    public static async Task<(bool isTor, string ip)> VerifyAsync(int port, CancellationToken ct)
++    {
++        Exception last = null;
++        for (int attempt = 0; attempt < 3; attempt++)
++        {
++            ct.ThrowIfCancellationRequested();
++            try
++            {
++                using var handler = new SocketsHttpHandler
++                {
++                    Proxy = new WebProxy(new Uri("socks5://127.0.0.1:" + port)),
++                    UseProxy = true, UseCookies = false, AllowAutoRedirect = false,
++                    ConnectTimeout = TimeSpan.FromSeconds(30),
++                };
++                using var http = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(45) };
++                var json = await http.GetStringAsync(CheckApi, ct);
++                using var doc = JsonDocument.Parse(json);
++                bool isTor = doc.RootElement.TryGetProperty("IsTor", out var t) && t.ValueKind == JsonValueKind.True;
++                string ip = doc.RootElement.TryGetProperty("IP", out var i) ? i.GetString() : "";
++                return (isTor, ip);
++            }
++            catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
++            catch (Exception ex) { last = ex; await Task.Delay(1500, ct); }
++        }
++        throw new IOException("Could not reach check.torproject.org through Tor: " + last?.Message);
++    }
++
++    // ---------- monitoring / recovery ----------
++
++    void StartMonitor()
++    {
++        try { monitorCts?.Cancel(); } catch { }
++        var cts = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token);
++        monitorCts = cts;
++        _ = Task.Run(() => MonitorAsync(cts.Token));
++    }
++
++    async Task MonitorAsync(CancellationToken ct)
++    {
++        while (!ct.IsCancellationRequested)
++        {
++            try { await Task.Delay(3000, ct); } catch { return; }
++            try
++            {
++                if (proc == null || proc.HasExited) throw new IOException("The Tor process stopped.");
++                bool up = (await ctl.GetInfoAsync("status/circuit-established", ct)).Trim() == "1";
++                var s = State;
++                if (!up)
++                {
++                    if (s == TorState.Connected) Set(TorState.Disconnected, 0, "Tor lost its connection to the network. Browsing is blocked until it comes back.");
++                    continue;
++                }
++                if (s == TorState.Disconnected)
++                {
++                    // Network is back: do not unblock until the end-to-end check passes again.
++                    var (isTor, _) = await VerifyAsync(SocksPort, ct);
++                    if (isTor) Set(TorState.Connected, 100, "Connected to Tor");
++                }
++            }
++            catch (OperationCanceledException) { return; }
++            catch (Exception ex)
++            {
++                if (stopping || ct.IsCancellationRequested) return;
++                Log("monitor: " + ex.Message);
++                Set(TorState.Disconnected, 0, "Tor stopped unexpectedly. Browsing is blocked while Veil restarts it…");
++                await RecoverAsync();
++                return;                       // a successful restart starts a fresh monitor
++            }
++        }
++    }
++
++    async Task RecoverAsync()
++    {
++        int[] delays = { 1000, 4000, 10000 };
++        foreach (var d in delays)
++        {
++            try { await Task.Delay(d, lifetime.Token); } catch { return; }
++            bool wanted; lock (sync) wanted = leases > 0;
++            if (!wanted || stopping && State == TorState.Stopped) return;
++            await gate.WaitAsync();
++            try
++            {
++                lock (sync) wanted = leases > 0;
++                if (!wanted) return;
++                await StartLockedAsync(lifetime.Token);
++                return;
++            }
++            catch (OperationCanceledException) { return; }
++            catch { /* StartLockedAsync already set Failed; try again after the next delay */ }
++            finally { gate.Release(); }
++        }
++        // still failing after three tries: stay in Failed until the user presses Retry
++        if (State != TorState.Stopped) Set(TorState.Failed, 0, "Tor could not be restarted. Browsing stays blocked. " + Detail);
++    }
++}
+diff -ruN orig/veil-main/windows/Veil.Windows/App/Tor/TorPages.cs veil-main/windows/Veil.Windows/App/Tor/TorPages.cs
+--- orig/veil-main/windows/Veil.Windows/App/Tor/TorPages.cs	1970-01-01 00:00:00.000000000 +0000
++++ veil-main/windows/Veil.Windows/App/Tor/TorPages.cs	2026-11-10 07:15:42.154046917 +0000
+@@ -0,0 +1,51 @@
++namespace Veil.Tor;
++
++/// The only pages a Tor window shows itself. They are plain HTML drawn with NavigateToString:
++/// no veil:// bridge, no access to history, bookmarks, settings or downloads of the normal windows.
++public static class TorPages
++{
++    const string Shell = @"<!doctype html><html><head><meta charset='utf-8'><title>__TITLE__</title>
++<meta name='viewport' content='width=device-width,initial-scale=1'>
++<meta http-equiv='Content-Security-Policy' content=""default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data:"">
++<meta name='color-scheme' content='dark light'>
++<style>
++:root{--bg:#f6f4f9;--panel:#fff;--line:#0002;--text:#1b1b1f;--mute:#66666f;--tor:#7d4698}
++@media (prefers-color-scheme:dark){:root{--bg:#17131c;--panel:#221b2b;--line:#fff2;--text:#ececf0;--mute:#9a9aa6;--tor:#b98ad4}}
++*{box-sizing:border-box}html,body{height:100%;margin:0}
++body{background:radial-gradient(900px 520px at 50% -10%,#7d469833,transparent 70%),var(--bg);color:var(--text);
++font:14px/1.55 'Segoe UI Variable Text','Segoe UI',system-ui,sans-serif;display:flex;align-items:center;justify-content:center}
++main{width:min(640px,90vw);display:flex;flex-direction:column;align-items:center;margin-top:-5vh;text-align:center}
++.onion{font-size:54px;line-height:1}h1{font-weight:600;font-size:26px;margin:12px 0 4px}
++.ok{color:var(--tor);font-weight:600}.mute{color:var(--mute)}
++form{width:100%;margin:26px 0 22px}
++input{width:100%;height:50px;border-radius:25px;border:1px solid var(--line);background:var(--panel);color:var(--text);font:inherit;font-size:16px;padding:0 22px;outline:none}
++input:focus{border-color:var(--tor)}
++.note{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:14px 18px;text-align:left;font-size:13px;color:var(--mute)}
++.note b{color:var(--text)}
++</style></head><body><main>__BODY__</main></body></html>";
++
++    static string Wrap(string title, string body) => Shell.Replace("__TITLE__", title).Replace("__BODY__", body);
++
++    /// Start page of a Tor tab. Only ever shown after the connection has been verified.
++    public static string NewTab() => Wrap("New Tor tab", @"
++<div class='onion'>🧅</div><h1>Tor window</h1>
++<div class='ok'>Connected to Tor · verified</div>
++<form id='f'><input id='q' type='text' placeholder='Search DuckDuckGo or enter address' autocomplete='off' spellcheck='false' autofocus></form>
++<div class='note'><b>What this does:</b> sites and your network see Tor, not your IP address, and this window keeps its cookies and history to itself
++and deletes them when it closes.<br><br>
++<b>What it does not do:</b> this is not Tor Browser. Your browser fingerprint (fonts, screen, engine version) can still make you recognisable,
++and anything you sign in to identifies you. Don’t use it where anonymity is a matter of safety.</div>
++<script>
++function go(v){v=v.trim();if(!v)return;var u;
++ if(/^[a-z][a-z0-9+.-]*:\/\//i.test(v))u=v;
++ else if(!/\s/.test(v)&&/^[^\s\/]+\.[a-z0-9-]{2,}(\/.*)?$/i.test(v))u=(/\.onion(\/|$)/i.test(v)?'http://':'https://')+v;
++ else u='https://duckduckgo.com/?q='+encodeURIComponent(v);
++ location.href=u;}
++document.getElementById('f').addEventListener('submit',function(e){e.preventDefault();go(document.getElementById('q').value);});
++</script>");
++
++    /// Shown instead of Veil's normal internal pages (history, settings, …), which must not be reachable from a Tor window.
++    public static string Unavailable() => Wrap("Not available", @"
++<div class='onion'>🧅</div><h1>Not available in a Tor window</h1>
++<p class='mute'>History, bookmarks, downloads and settings belong to your normal windows and are kept out of Tor windows on purpose.</p>");
++}
+diff -ruN orig/veil-main/windows/Veil.Windows/ThirdParty/.gitignore veil-main/windows/Veil.Windows/ThirdParty/.gitignore
+--- orig/veil-main/windows/Veil.Windows/ThirdParty/.gitignore	1970-01-01 00:00:00.000000000 +0000
++++ veil-main/windows/Veil.Windows/ThirdParty/.gitignore	2026-11-10 07:19:58.735342149 +0000
+@@ -0,0 +1,2 @@
++# Filled by scripts/fetch_tor.ps1 (official Tor Expert Bundle); not committed.
++tor/
+diff -ruN orig/veil-main/windows/Veil.Windows/ThirdParty/NOTICE-tor.txt veil-main/windows/Veil.Windows/ThirdParty/NOTICE-tor.txt
+--- orig/veil-main/windows/Veil.Windows/ThirdParty/NOTICE-tor.txt	1970-01-01 00:00:00.000000000 +0000
++++ veil-main/windows/Veil.Windows/ThirdParty/NOTICE-tor.txt	2026-11-10 07:19:37.472098393 +0000
+@@ -0,0 +1,42 @@
++Third-party software shipped with Veil for Windows: Tor
++=======================================================
++
++Veil's "New Tor window" runs the unmodified `tor` daemon from the official Tor Expert Bundle published by the
++Tor Project (https://www.torproject.org/download/tor/). Veil does not implement or modify the Tor protocol.
++The bundle is placed in the "tor" folder next to Veil.exe (see windows\scripts\fetch_tor.ps1, which also records
++the exact release in tor\VERSION.txt).
++
++Tor
++  Copyright (c) 2001-2004, Roger Dingledine
++  Copyright (c) 2004-2007, Roger Dingledine, Nick Mathewson
++  Copyright (c) 2007-, The Tor Project, Inc.
++  Licensed under the 3-clause BSD license.
++
++The BSD 3-clause license requires that redistributions in binary form reproduce the copyright notice, the list of
++conditions and the disclaimer in the documentation or other materials that come with the distribution:
++
++  Redistribution and use in source and binary forms, with or without modification, are permitted provided that
++  the following conditions are met:
++    * Redistributions of source code must retain the above copyright notice, this list of conditions and the
++      following disclaimer.
++    * Redistributions in binary form must reproduce the above copyright notice, this list of conditions and the
++      following disclaimer in the documentation and/or other materials provided with the distribution.
++    * Neither the names of the copyright owners nor the names of its contributors may be used to endorse or promote
++      products derived from this software without specific prior written permission.
++  THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES,
++  INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
++  DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
++  SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
++  SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++  WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE
++  USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++
++The tor binaries also contain or link third-party libraries (for example libevent, zlib and OpenSSL) under their own
++licenses. The complete, authoritative license text for the exact release you ship is the LICENSE file of the Tor
++source code for that release (https://gitlab.torproject.org/tpo/core/tor) plus the notices of those libraries.
++BEFORE DISTRIBUTING a build, add those texts (or ship any license files that come inside the bundle, which the
++build copies automatically) - this notice is not a substitute for them.
++
++"Tor" and the Tor onion logo are trademarks of The Tor Project, Inc. Veil uses the word only to say that a window's
++traffic is routed through the Tor network. Veil is not Tor Browser and is not affiliated with or endorsed by the
++Tor Project; see https://www.torproject.org/about/trademark/ before using their logo or name in marketing.
+diff -ruN orig/veil-main/windows/Veil.Windows/Veil.Windows.csproj veil-main/windows/Veil.Windows/Veil.Windows.csproj
+--- orig/veil-main/windows/Veil.Windows/Veil.Windows.csproj	2026-11-10 06:25:14.000000000 +0000
++++ veil-main/windows/Veil.Windows/Veil.Windows.csproj	2026-11-10 07:19:07.760472245 +0000
+@@ -15,6 +15,13 @@
+   <ItemGroup>
+     <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.2592.51" />
+   </ItemGroup>
++  <!-- Official Tor Expert Bundle (filled in by windows\scripts\fetch_tor.ps1). Copied next to Veil.exe as \tor\... -->
++  <ItemGroup Condition="Exists('ThirdParty\tor')">
++    <Content Include="ThirdParty\tor\**\*" Link="tor\%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
++  </ItemGroup>
++  <ItemGroup>
++    <Content Include="ThirdParty\NOTICE-tor.txt" Link="NOTICE-tor.txt" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
++  </ItemGroup>
+   <ItemGroup>
+     <EmbeddedResource Include="Assets\*.js;Assets\*.css;Assets\*.json" LogicalName="%(Filename)%(Extension)" />
+     <Resource Include="Assets\AppIcon.ico" />
+diff -ruN orig/veil-main/windows/scripts/build_windows.ps1 veil-main/windows/scripts/build_windows.ps1
+--- orig/veil-main/windows/scripts/build_windows.ps1	2026-11-10 06:25:14.000000000 +0000
++++ veil-main/windows/scripts/build_windows.ps1	2026-11-10 07:19:37.479340885 +0000
+@@ -7,7 +7,8 @@
+ #>
+ param(
+   [string]$Version = "0.1.0",
+-  [switch]$FrameworkDependent
++  [switch]$FrameworkDependent,
++  [switch]$FetchTor          # download + verify the official Tor Expert Bundle first (needed for "New Tor window")
+ )
+ $ErrorActionPreference = "Stop"
+ $root = Resolve-Path (Join-Path $PSScriptRoot "..")
+@@ -15,6 +16,10 @@
+ $out  = Join-Path $root "dist\Veil-$Version-win-x64"
+ $sc   = if ($FrameworkDependent) { "false" } else { "true" }
+ 
++if ($FetchTor) { & (Join-Path $PSScriptRoot "fetch_tor.ps1") }
++$torExe = Get-ChildItem (Join-Path $root "Veil.Windows\ThirdParty\tor") -Recurse -Filter tor.exe -ErrorAction SilentlyContinue | Select-Object -First 1
++if (-not $torExe) { Write-Warning "No tor.exe in Veil.Windows\ThirdParty\tor: this build will show 'Tor is not included' for New Tor window. Run scripts\fetch_tor.ps1 or pass -FetchTor." }
++
+ if (Test-Path $out) { Remove-Item $out -Recurse -Force }
+ dotnet publish $proj -c Release -r win-x64 --self-contained $sc `
+   -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:Version=$Version -o $out
+diff -ruN orig/veil-main/windows/scripts/check_tor_traffic.ps1 veil-main/windows/scripts/check_tor_traffic.ps1
+--- orig/veil-main/windows/scripts/check_tor_traffic.ps1	1970-01-01 00:00:00.000000000 +0000
++++ veil-main/windows/scripts/check_tor_traffic.ps1	2026-11-10 07:19:58.740336984 +0000
+@@ -0,0 +1,47 @@
++<#
++ Leak check for Tor windows. Run it in PowerShell WHILE you browse in a Tor window.
++ It finds every msedgewebview2.exe process that belongs to Tor windows (their user-data folder is under
++ %LOCALAPPDATA%\Veil\TorSession) and lists their network sockets.
++
++ PASS  = every TCP connection of those processes goes to 127.0.0.1 / ::1 (that is Tor's SOCKS port) and nothing else.
++ FAIL  = any TCP connection to a non-loopback address, i.e. a direct connection that bypassed Tor.
++ UDP sockets are listed too: Chromium may keep local sockets open, but with the Tor switches it must not send
++ anything to the internet over UDP (QUIC and WebRTC are disabled); a non-loopback UDP *remote* cannot be shown by
++ Windows, so use Wireshark/pktmon with the filter in windows\TOR-WINDOW.md if you need packet-level proof.
++
++ Usage:  .\windows\scripts\check_tor_traffic.ps1 [-Seconds 30]
++#>
++param([int]$Seconds = 30)
++$sess = (Join-Path $env:LOCALAPPDATA "Veil\TorSession").ToLowerInvariant()
++$bad = @{}
++$seen = 0
++$end = (Get-Date).AddSeconds($Seconds)
++Write-Host "Sampling for $Seconds s. Browse in the Tor window now (open several sites and tabs)..."
++while ((Get-Date) -lt $end) {
++  $procs = Get-CimInstance Win32_Process -Filter "Name='msedgewebview2.exe'" |
++           Where-Object { $_.CommandLine -and $_.CommandLine.ToLowerInvariant().Contains($sess) }
++  foreach ($p in $procs) {
++    foreach ($c in (Get-NetTCPConnection -OwningProcess $p.ProcessId -ErrorAction SilentlyContinue)) {
++      if ($c.State -in 'Listen','Bound') { continue }
++      $seen++
++      $ra = $c.RemoteAddress
++      if ($ra -notin '127.0.0.1','::1','0.0.0.0','::') { $bad["$($p.ProcessId) -> ${ra}:$($c.RemotePort) ($($c.State))"] = $true }
++    }
++  }
++  Start-Sleep -Milliseconds 700
++}
++$procs = Get-CimInstance Win32_Process -Filter "Name='msedgewebview2.exe'" |
++         Where-Object { $_.CommandLine -and $_.CommandLine.ToLowerInvariant().Contains($sess) }
++Write-Host ("Tor-window WebView2 processes found: {0}; TCP connections observed: {1}" -f @($procs).Count, $seen)
++if (@($procs).Count -eq 0) { Write-Warning "No Tor window browser process found - is a Tor window open?"; exit 2 }
++foreach ($p in $procs) {
++  foreach ($u in (Get-NetUDPEndpoint -OwningProcess $p.ProcessId -ErrorAction SilentlyContinue)) {
++    Write-Host ("  UDP socket (pid {0}): {1}:{2}" -f $p.ProcessId, $u.LocalAddress, $u.LocalPort)
++  }
++}
++if ($bad.Count -gt 0) {
++  Write-Host "`nFAIL: direct (non-loopback) TCP connections from Tor-window processes:" -ForegroundColor Red
++  $bad.Keys | Sort-Object | ForEach-Object { Write-Host "  $_" -ForegroundColor Red }
++  exit 1
++}
++Write-Host "`nPASS: no direct TCP connections; everything went to the local Tor SOCKS port." -ForegroundColor Green
+diff -ruN orig/veil-main/windows/scripts/fetch_tor.ps1 veil-main/windows/scripts/fetch_tor.ps1
+--- orig/veil-main/windows/scripts/fetch_tor.ps1	1970-01-01 00:00:00.000000000 +0000
++++ veil-main/windows/scripts/fetch_tor.ps1	2026-11-10 07:19:37.471324708 +0000
+@@ -0,0 +1,92 @@
++<#
++ Downloads the official Tor Expert Bundle (the tor.exe the Tor Project builds for Tor Browser) into
++ windows\Veil.Windows\ThirdParty\tor so that the build copies it next to Veil.exe.
++
++ Usage:   .\windows\scripts\fetch_tor.ps1                 # newest stable release
++          .\windows\scripts\fetch_tor.ps1 -Version 15.0.5 # a specific Tor Browser release number
++
++ What it checks, and it stops on any mismatch:
++   1. SHA-256 of the download against sha256sums-signed-build.txt from the Tor Project
++   2. the OpenPGP signature (.asc) of the download, made by the "Tor Browser Developers" key
++      (needs GnuPG: winget install GnuPG.GnuPG).  -SkipSignature skips this and ONLY keeps the hash check,
++      which proves nothing against someone who controls the download server. Don't ship that way.
++ The version number is the Tor Browser release; the bundle contains the matching tor daemon.
++#>
++param(
++  [string]$Version = "",
++  [switch]$SkipSignature
++)
++$ErrorActionPreference = "Stop"
++$ProgressPreference = "SilentlyContinue"
++
++# Fingerprint of the Tor Browser Developers signing key (https://support.torproject.org/tbb/how-to-verify-signature/)
++$ExpectedFpr = "EF6E286DDA85EA2A4BA7DE684E2C6E8793298290"
++
++$dest = Join-Path $PSScriptRoot "..\Veil.Windows\ThirdParty\tor"
++$work = Join-Path ([IO.Path]::GetTempPath()) ("veil-tor-" + [Guid]::NewGuid().ToString("N"))
++New-Item -ItemType Directory -Force $work | Out-Null
++
++try {
++  if (-not $Version) {
++    $meta = Invoke-RestMethod "https://aus1.torproject.org/torbrowser/update_3/release/downloads.json"
++    $Version = [string]$meta.version
++    if (-not $Version) { throw "Could not read the current version from downloads.json. Pass -Version (see https://www.torproject.org/download/tor/)." }
++  }
++  Write-Host "Tor Expert Bundle for Tor Browser $Version (windows-x86_64)"
++
++  $file = "tor-expert-bundle-windows-x86_64-$Version.tar.gz"
++  $bases = @("https://dist.torproject.org/torbrowser/$Version", "https://archive.torproject.org/tor-package-archive/torbrowser/$Version")
++
++  function Get-First($name, $out) {
++    foreach ($b in $bases) {
++      try { Invoke-WebRequest "$b/$name" -OutFile $out -UseBasicParsing; return $true } catch { }
++    }
++    return $false
++  }
++
++  $tgz = Join-Path $work $file
++  if (-not (Get-First $file $tgz)) { throw "Could not download $file from dist.torproject.org or archive.torproject.org." }
++  $sums = Join-Path $work "sha256sums-signed-build.txt"
++  if (-not (Get-First "sha256sums-signed-build.txt" $sums)) { throw "Could not download sha256sums-signed-build.txt." }
++
++  # 1. hash
++  $line = Get-Content $sums | Where-Object { $_ -match [regex]::Escape($file) + "\s*$" } | Select-Object -First 1
++  if (-not $line) { throw "$file is not listed in sha256sums-signed-build.txt." }
++  $want = ($line -split "\s+")[0].ToLowerInvariant()
++  $got = (Get-FileHash $tgz -Algorithm SHA256).Hash.ToLowerInvariant()
++  if ($want -ne $got) { throw "SHA-256 mismatch for $file`n  expected $want`n  got      $got" }
++  Write-Host "SHA-256 OK  ($got)"
++
++  # 2. signature
++  if ($SkipSignature) {
++    Write-Warning "Signature check skipped. Only the SHA-256 from the same server was verified."
++  } else {
++    $gpg = Get-Command gpg -ErrorAction SilentlyContinue
++    if (-not $gpg) { throw "GnuPG (gpg) is required to verify the signature. Install it (winget install GnuPG.GnuPG) or pass -SkipSignature (not recommended)." }
++    $asc = "$tgz.asc"
++    if (-not (Get-First "$file.asc" $asc)) { throw "Could not download $file.asc." }
++    $home_ = Join-Path $work "gnupg"; New-Item -ItemType Directory -Force $home_ | Out-Null
++    & gpg --homedir $home_ --batch --auto-key-locate "nodefault,wkd" --locate-keys torbrowser@torproject.org 2>&1 | Out-Null
++    $fprs = (& gpg --homedir $home_ --batch --with-colons --fingerprint torbrowser@torproject.org) | Where-Object { $_ -like "fpr:*" } | ForEach-Object { ($_ -split ":")[9] }
++    if ($fprs -notcontains $ExpectedFpr) { throw "The key fetched for torbrowser@torproject.org does not have the expected fingerprint $ExpectedFpr (got: $($fprs -join ', '))." }
++    $out = & gpg --homedir $home_ --batch --status-fd 1 --verify $asc $tgz 2>&1
++    if (-not ($out -match "VALIDSIG")) { throw "Signature verification FAILED:`n$out" }
++    Write-Host "OpenPGP signature OK (key $ExpectedFpr)"
++  }
++
++  # extract
++  $x = Join-Path $work "x"; New-Item -ItemType Directory -Force $x | Out-Null
++  & tar -xzf $tgz -C $x
++  if ($LASTEXITCODE -ne 0) { throw "tar failed to extract the bundle." }
++  $exe = Get-ChildItem $x -Recurse -Filter tor.exe | Select-Object -First 1
++  if (-not $exe) { throw "tor.exe not found inside the bundle." }
++
++  if (Test-Path $dest) { Remove-Item $dest -Recurse -Force }
++  New-Item -ItemType Directory -Force $dest | Out-Null
++  Copy-Item (Join-Path $x "*") $dest -Recurse -Force
++  Set-Content (Join-Path $dest "VERSION.txt") "Tor Browser $Version / $file`nsha256 $got`nFetched $(Get-Date -Format s)"
++  Write-Host "`nInstalled to $dest`nNow build:  .\windows\scripts\build_windows.ps1"
++}
++finally {
++  Remove-Item $work -Recurse -Force -ErrorAction SilentlyContinue
++}
