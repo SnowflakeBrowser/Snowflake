@@ -6,6 +6,7 @@ using System.Windows.Markup;
 using System.Windows.Media;
 using Microsoft.Web.WebView2.Core;
 using Veil.Core;
+using Veil.Tor;
 
 namespace Veil;
 
@@ -96,9 +97,9 @@ static class Theme
     }
 }
 
-public sealed class MainWindow : Window
+public sealed partial class MainWindow : Window
 {
-    public static MainWindow Current;
+    public static MainWindow Current;     // the normal main window (never a Tor window)
 
     sealed class Parts { public Image Fav; public TextBlock Title; public Button Audio, Close; }
 
@@ -128,11 +129,12 @@ public sealed class MainWindow : Window
     readonly Grid rootGrid = new();
     bool fullscreen; WindowState prevState; WindowStyle prevStyle;
 
-    public MainWindow(string startUrl)
+    public MainWindow(string startUrl, bool tor = false)
     {
-        Current = this;
+        isTor = tor;
+        if (!isTor) Current = this;       // Bridge and external links always talk to the normal window
         startupUrl = startUrl;
-        Title = "Veil";
+        Title = isTor ? "Veil (Tor)" : "Veil";
         MinWidth = 520; MinHeight = 360;
         Theme.Apply();
         SetResourceReference(BackgroundProperty, "Bg");
@@ -171,6 +173,7 @@ public sealed class MainWindow : Window
 
         Grid.SetRow(content, 3); chrome.Children.Add(content);
         Content = rootGrid;
+        if (isTor) BuildTorOverlay();
 
         PreviewKeyDown += (s, e) =>
         {
@@ -178,7 +181,9 @@ public sealed class MainWindow : Window
             var m = Keyboard.Modifiers;
             if (HandleShortcut(k, m.HasFlag(ModifierKeys.Control), m.HasFlag(ModifierKeys.Shift), m.HasFlag(ModifierKeys.Alt))) e.Handled = true;
         };
-        Services.Changed += () => Dispatcher.BeginInvoke(new Action(OnServicesChanged));
+        Action onServicesChanged = () => Dispatcher.BeginInvoke(new Action(OnServicesChanged));
+        Services.Changed += onServicesChanged;
+        Closed += (s, e) => { Services.Changed -= onServicesChanged; idleTimer.Stop(); cookieTimer.Stop(); };
         SourceInitialized += (s, e) => ApplyTitleBar();
         PreviewMouseDown += (s, e) =>
         {
@@ -190,7 +195,7 @@ public sealed class MainWindow : Window
         idleTimer.Start();
         cookieTimer.Tick += (_, __) => _ = KeepSessionCookiesAsync();
         cookieTimer.Start();
-        Loaded += async (s, e) => await StartAsync();
+        Loaded += async (s, e) => { if (isTor) await TorStartAsync(); else await StartAsync(); };
         Closing += OnClosing;
     }
 
@@ -311,7 +316,7 @@ public sealed class MainWindow : Window
         {
             if (e.Key == Key.Enter)
             {
-                var url = UrlResolver.Resolve(address.Text, SearchEngines.Template(Services.Settings.Str("searchEngine")));
+                var url = UrlResolver.Resolve(address.Text, SearchTemplate);
                 active?.Navigate(url);
                 active?.FocusPage();
                 e.Handled = true;
@@ -325,6 +330,13 @@ public sealed class MainWindow : Window
         var dock = new DockPanel { Margin = new Thickness(6, 4, 6, 6) };
         foreach (var b in new[] { backB, fwdB, reloadB }) { DockPanel.SetDock(b, Dock.Left); dock.Children.Add(b); }
         foreach (var b in new[] { menuB, dlB, shieldB, starB }) { DockPanel.SetDock(b, Dock.Right); dock.Children.Add(b); }
+        if (isTor)
+        {
+            torPill = BuildTorPill();
+            DockPanel.SetDock(torPill, Dock.Right);
+            dock.Children.Add(torPill);
+            field.BorderBrush = TorPurple;     // purple address bar: this is the Tor window
+        }
         dock.Children.Add(field);
         var wrap = new Border { Child = dock };
         wrap.SetResourceReference(Border.BackgroundProperty, "Bar");
@@ -333,10 +345,12 @@ public sealed class MainWindow : Window
 
     void ShowMainMenu()
     {
+        if (isTor) { ShowTorMenu(); return; }
         VeilMenu.Show(menuB, new[]
         {
             MenuEntry.Item("New tab", () => NewTab(), "Ctrl+T"),
             MenuEntry.Item("New private tab", () => NewTab(null, true), "Ctrl+Shift+N"),
+            MenuEntry.Item("New Tor window", () => OpenTorWindow(), "Alt+Shift+N"),
             MenuEntry.Sep(),
             MenuEntry.Item("History", () => OpenInternal("veil://history"), "Ctrl+H"),
             MenuEntry.Item("Bookmarks", () => OpenInternal("veil://bookmarks")),
@@ -420,6 +434,7 @@ public sealed class MainWindow : Window
     // ---------- tabs ----------
     public void OpenInternal(string url)
     {
+        if (isTor) return;      // history, settings, downloads ... belong to the normal windows
         var existing = tabs.FirstOrDefault(t => t.Url == url && !t.IsPrivate);
         if (existing != null) { Activate(existing); return; }
         if (active != null && active.Url == UrlResolver.NewTab) active.Navigate(url); else NewTab(url);
@@ -427,7 +442,8 @@ public sealed class MainWindow : Window
 
     public BrowserTab NewTab(string url = null, bool isPrivate = false, bool activate = true)
     {
-        var t = new BrowserTab(this, isPrivate) { Url = url ?? UrlResolver.NewTab };
+        if (isTor && !torReady && !torVerifying) return null;     // no tabs until Tor is verified
+        var t = new BrowserTab(this, isPrivate || isTor) { Url = url ?? UrlResolver.NewTab };
         t.PendingUrl = t.Url;
         t.Header = MakeHeader(t);
         t.Changed += () => Refresh(t);
@@ -532,7 +548,7 @@ public sealed class MainWindow : Window
     {
         if (t.Header == null) return;
         var p = (Parts)t.Header.Tag;
-        p.Title.Text = (t.IsPrivate ? "🕶 " : "") + t.DisplayTitle;
+        p.Title.Text = (isTor ? "🧅 " : t.IsPrivate ? "🕶 " : "") + t.DisplayTitle;
         p.Fav.Source = t.Favicon;
         p.Audio.Content = t.Muted ? "\uE74F" : "\uE767";
         p.Audio.Visibility = t.Audible || t.Muted ? Visibility.Visible : Visibility.Collapsed;
@@ -554,7 +570,7 @@ public sealed class MainWindow : Window
         starB.SetResourceReference(Control.ForegroundProperty, web && Services.Bookmarks.Contains(active.Url) ? "Accent" : "Text");
         var host = UrlResolver.HostOf(active.Url);
         shieldB.Opacity = web && Services.Allowlist.Contains(host) ? 0.35 : 1.0;
-        Title = active.DisplayTitle + (active.IsPrivate ? " (Private)" : "") + " – Veil";
+        Title = active.DisplayTitle + (isTor ? " (Tor)" : active.IsPrivate ? " (Private)" : "") + " – Veil";
     }
 
     // ---------- settings-driven chrome ----------
@@ -588,6 +604,7 @@ public sealed class MainWindow : Window
         RebuildBookmarks();
         foreach (var t in tabs) { _ = t.ApplyScriptsAsync(); Refresh(t); }
         UpdateChrome(false);
+        if (isTor) ApplyTorChrome();
     }
 
     // ---------- settings that need a little native help ----------
@@ -712,6 +729,7 @@ public sealed class MainWindow : Window
     void RebuildBookmarks()
     {
         bookmarksBar.Children.Clear();
+        if (isTor) { bookmarksWrap.Visibility = Visibility.Collapsed; return; }     // also keeps favicon fetches off the direct network
         bool show = Services.Settings.Bool("showBookmarksBar") && Services.Bookmarks.All.Count > 0;
         bookmarksWrap.Visibility = show ? Visibility.Visible : Visibility.Collapsed;
         if (!show) return;
@@ -755,7 +773,7 @@ public sealed class MainWindow : Window
                 case Key.W: if (active != null) CloseTab(active); return true;
                 case Key.N when shift: NewTab(null, true); return true;
                 case Key.L: address.Focus(); address.SelectAll(); return true;
-                case Key.D: ToggleBookmark(); return true;
+                case Key.D: if (!isTor) ToggleBookmark(); return true;
                 case Key.R: active?.Reload(); return true;
                 case Key.Tab: Cycle(shift ? -1 : 1); return true;
                 case Key.PageDown: Cycle(1); return true;
@@ -772,6 +790,7 @@ public sealed class MainWindow : Window
         {
             switch (key)
             {
+                case Key.N when shift: OpenTorWindow(); return true;     // Ctrl+Shift+N is taken by "New private tab"
                 case Key.Left: active?.GoBack(); return true;
                 case Key.Right: active?.GoForward(); return true;
                 case Key.D: address.Focus(); address.SelectAll(); return true;
@@ -824,7 +843,7 @@ public sealed class MainWindow : Window
     // ---------- persistence ----------
     void SaveSession()
     {
-        if (tabs.Count == 0) return;
+        if (isTor || tabs.Count == 0) return;     // a Tor window must never overwrite the normal session
         var s = new SessionState();
         foreach (var t in tabs.Where(t => !t.IsPrivate && t.Url.Length > 0))
         {
@@ -836,10 +855,12 @@ public sealed class MainWindow : Window
 
     void OnClosing(object sender, System.ComponentModel.CancelEventArgs e)
     {
+        if (isTor) { TorOnClosing(); return; }
         if (Services.Settings.Bool("confirmCloseWindow") || (Services.Settings.Bool("confirmQuit")))
             if (MessageBox.Show("Close Veil?", "Veil", MessageBoxButton.YesNo, MessageBoxImage.Question) != MessageBoxResult.Yes) { e.Cancel = true; return; }
         if (Services.Downloads.HasActive &&
             MessageBox.Show("A download is still running. Quit anyway?", "Veil", MessageBoxButton.YesNo, MessageBoxImage.Warning) != MessageBoxResult.Yes) { e.Cancel = true; return; }
+        CloseAllTorWindows();       // the app exits with this window; Tor windows go first so their data is wiped
         SaveSession();
         var rb = RestoreBounds;
         Services.Window.Value = new WindowBounds { Left = rb.Left, Top = rb.Top, Width = rb.Width, Height = rb.Height, Maximized = WindowState == WindowState.Maximized };

@@ -9,6 +9,7 @@ using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using Microsoft.Web.WebView2.Core;
 using Veil.Core;
+using Veil.Tor;
 
 namespace Veil;
 
@@ -34,6 +35,8 @@ public sealed class BrowserTab
     public string PendingUrl;
     public DateTime LastActive = DateTime.Now;
     public bool IsPopup;                    // created for window.open: the engine navigates it, we must not
+    public bool IsTor => win.IsTor;         // lives in a Tor window: Tor environment, no persistence, no bridge
+    CoreWebView2Environment env;            // the environment this tab was created in (Services.Env, or the Tor one)
     public Border Header;                   // tab strip item (built by MainWindow)
     public event Action Changed;
 
@@ -76,6 +79,8 @@ public sealed class BrowserTab
         catch { }
     }
     static void Later(Action a) => Application.Current.Dispatcher.BeginInvoke(a);
+    /// Debug trace for normal tabs. Tor tabs never write anything about their browsing to disk.
+    void D(string msg) { if (!IsTor) Dbg(msg); }
 
     public void Navigate(string url)
     {
@@ -100,10 +105,12 @@ public sealed class BrowserTab
         Host.UpdateLayout();
         var hwnd = await Host.HandleReady;
         await Services.Blocker.Ready;
-        var opts = Services.Env.CreateCoreWebView2ControllerOptions();
-        opts.ProfileName = IsPrivate ? "VeilPrivate" : "Default";
+        // Tor tabs use the Tor environment (proxied, throw-away folder) and their window's own in-private profile.
+        env = IsTor ? await win.TorEnvTask : Services.Env;
+        var opts = env.CreateCoreWebView2ControllerOptions();
+        opts.ProfileName = IsTor ? win.TorProfileName : IsPrivate ? "VeilPrivate" : "Default";
         opts.IsInPrivateModeEnabled = IsPrivate;
-        var controller = await Services.Env.CreateCoreWebView2ControllerAsync(hwnd, opts);
+        var controller = await env.CreateCoreWebView2ControllerAsync(hwnd, opts);
         Host.Controller = controller;
         Core = controller.CoreWebView2;
         var dpi = VisualTreeHelper.GetDpi(Host);
@@ -117,10 +124,16 @@ public sealed class BrowserTab
         st.IsGeneralAutofillEnabled = false;
         st.IsPasswordAutosaveEnabled = false;
         st.AreDevToolsEnabled = Services.Settings.Bool("developerTools");
+        if (IsTor)
+        {
+            // SmartScreen would send the addresses you visit to Microsoft; keep Tor browsing between you and Tor.
+            try { st.IsReputationCheckingRequired = false; } catch { }
+            try { st.IsGeneralAutofillEnabled = false; st.IsPasswordAutosaveEnabled = false; } catch { }
+        }
         ApplyCookieMode();
         Core.AddWebResourceRequestedFilter("*", CoreWebView2WebResourceContext.All);
-        try { Core.AddWebResourceRequestedFilter("veil://*", CoreWebView2WebResourceContext.All); } catch (Exception ex) { Dbg("veil filter: " + ex.Message); }
-        Dbg("tab created, scheme filter added");
+        try { Core.AddWebResourceRequestedFilter("veil://*", CoreWebView2WebResourceContext.All); } catch (Exception ex) { D("veil filter: " + ex.Message); }
+        D("tab created, scheme filter added");
         Wire(controller);
         await ApplyScriptsAsync();
 
@@ -239,7 +252,22 @@ public sealed class BrowserTab
         Core.NavigationStarting += (s, e) =>
         {
             var uri = e.Uri;
-            Dbg("NavigationStarting " + uri);
+            D("NavigationStarting " + uri);
+            if (IsTor)
+            {
+                // Fail closed: nothing loads unless Tor is verified and connected right now.
+                if (!win.TorAllows(uri)) { e.Cancel = true; return; }
+                if (uri.StartsWith("veil://", StringComparison.OrdinalIgnoreCase))
+                {
+                    var vh = Uri.TryCreate(uri, UriKind.Absolute, out var tu) ? tu.Host.ToLowerInvariant() : "";
+                    e.Cancel = true;
+                    Url = uri.TrimEnd('/');
+                    var page = vh == "newtab" ? TorPages.NewTab() : TorPages.Unavailable();
+                    Later(() => Core.NavigateToString(page));
+                    Raise();
+                    return;
+                }
+            }
             if (uri.StartsWith("veil://", StringComparison.OrdinalIgnoreCase) && !uri.StartsWith("veil://insecure", StringComparison.OrdinalIgnoreCase))
             {
                 // Veil's own pages are drawn directly (no custom scheme needed), so they always show up.
@@ -268,7 +296,8 @@ public sealed class BrowserTab
                 if (cleaned != null) { e.Cancel = true; Later(() => Core.Navigate(cleaned)); return; }
             }
             if (uri.StartsWith("http://", StringComparison.OrdinalIgnoreCase) && Services.Settings.Bool("httpsUpgrade")
-                && Uri.TryCreate(uri, UriKind.Absolute, out var hu) && !UrlResolver.IsLocalHost(hu.Host) && !Services.InsecureOk.Contains(hu.Host))
+                && Uri.TryCreate(uri, UriKind.Absolute, out var hu) && !UrlResolver.IsLocalHost(hu.Host) && !Services.InsecureOk.Contains(hu.Host)
+                && !(IsTor && hu.Host.EndsWith(".onion", StringComparison.OrdinalIgnoreCase)))
             {
                 var https = "https://" + uri.Substring(7);
                 e.Cancel = true;
@@ -296,7 +325,7 @@ public sealed class BrowserTab
         Core.NavigationCompleted += (s, e) =>
         {
             Loading = false;
-            Dbg("NavigationCompleted ok=" + e.IsSuccess + " status=" + e.WebErrorStatus + " source=" + Core.Source);
+            D("NavigationCompleted ok=" + e.IsSuccess + " status=" + e.WebErrorStatus + " source=" + Core.Source);
             if (!e.IsSuccess)
             {
                 if (pendingUpgrade is { } up && e.WebErrorStatus != CoreWebView2WebErrorStatus.OperationCanceled)
@@ -349,8 +378,8 @@ public sealed class BrowserTab
         Core.IsDocumentPlayingAudioChanged += (s, e) => { Audible = Core.IsDocumentPlayingAudio; Raise(); };
         Core.ContainsFullScreenElementChanged += (s, e) => win.SetFullscreen(Core.ContainsFullScreenElement);
         Core.WindowCloseRequested += (s, e) => win.CloseTab(this);
-        Core.DownloadStarting += (s, e) => Services.Downloads.Attach(e);
-        Core.ProcessFailed += (s, e) => Dbg("ProcessFailed " + e.ProcessFailedKind + " " + e.Reason);
+        Core.DownloadStarting += (s, e) => { if (!IsTor) Services.Downloads.Attach(e); };   // Tor: WebView2's own (in-memory) download UI
+        Core.ProcessFailed += (s, e) => D("ProcessFailed " + e.ProcessFailedKind + " " + e.Reason);
 
         Core.NewWindowRequested += async (s, e) =>
         {
@@ -368,6 +397,7 @@ public sealed class BrowserTab
 
         Core.PermissionRequested += (s, e) =>
         {
+            if (IsTor) { e.State = CoreWebView2PermissionState.Deny; return; }
             string k = e.PermissionKind == CoreWebView2PermissionKind.Microphone ? "microphone"
                      : e.PermissionKind == CoreWebView2PermissionKind.Camera ? "camera" : null;
             if (k == null) return;
@@ -382,7 +412,8 @@ public sealed class BrowserTab
 
         Core.WebMessageReceived += async (s, e) =>
         {
-            Dbg("WebMessage from " + e.Source);
+            if (IsTor) return;      // Tor windows never talk to Veil's settings / history bridge
+            D("WebMessage from " + e.Source);
             // Only Veil's own pages may use the bridge: either served from veil://, or drawn directly while this tab is showing a veil:// page.
             var origin = e.Source ?? "";
             bool ours = origin.StartsWith("veil://", StringComparison.OrdinalIgnoreCase)
@@ -397,7 +428,7 @@ public sealed class BrowserTab
                 var cmd = root.GetProperty("cmd").GetString();
                 var args = root.TryGetProperty("args", out var a) ? a : default;
                 JsonNode result = null;
-                try { result = await Bridge.Handle(this, cmd, args); } catch (Exception bex) { Dbg("Bridge " + cmd + " failed: " + bex); }
+                try { result = await Bridge.Handle(this, cmd, args); } catch (Exception bex) { D("Bridge " + cmd + " failed: " + bex); }
                 Core.PostWebMessageAsJson(new JsonObject { ["id"] = id, ["result"] = result }.ToJsonString());
             }
             catch { }
@@ -414,9 +445,19 @@ public sealed class BrowserTab
     void OnRequest(object sender, CoreWebView2WebResourceRequestedEventArgs e)
     {
         var uri = e.Request.Uri;
+        var rEnv = env ?? Services.Env;
+        if (IsTor && !win.TorUsable
+            && (uri.StartsWith("http://", StringComparison.OrdinalIgnoreCase) || uri.StartsWith("https://", StringComparison.OrdinalIgnoreCase)
+                || uri.StartsWith("ws://", StringComparison.OrdinalIgnoreCase) || uri.StartsWith("wss://", StringComparison.OrdinalIgnoreCase))
+            && !win.TorAllows(uri))
+        {
+            // Kill switch #2 (the first is the dead proxy): while Tor is not verified/connected, no subresource goes out.
+            e.Response = rEnv.CreateWebResourceResponse(null, 503, "Tor not connected", "");
+            return;
+        }
         if (uri.StartsWith("veil://", StringComparison.OrdinalIgnoreCase))
         {
-            Dbg("Request " + uri);
+            D("Request " + uri);
             string html;
             try { html = Uri.TryCreate(uri, UriKind.Absolute, out var u) ? Pages.Html(u.Host) : null; }
             catch (Exception ex)
@@ -425,9 +466,9 @@ public sealed class BrowserTab
                 html = "<!doctype html><meta charset=utf-8><body style=\"font:14px Segoe UI,sans-serif;padding:24px;color:#ddd;background:#17171a\"><h2>Veil page error</h2><pre style=\"white-space:pre-wrap\">"
                        + Pages.Escape(ex.ToString()) + "</pre>";
             }
-            Dbg("Serving " + uri + " bytes=" + (html == null ? -1 : html.Length));
-            if (html == null) { e.Response = Services.Env.CreateWebResourceResponse(null, 404, "Not Found", ""); return; }
-            e.Response = Services.Env.CreateWebResourceResponse(new MemoryStream(Encoding.UTF8.GetBytes(html)), 200, "OK",
+            D("Serving " + uri + " bytes=" + (html == null ? -1 : html.Length));
+            if (html == null) { e.Response = rEnv.CreateWebResourceResponse(null, 404, "Not Found", ""); return; }
+            e.Response = rEnv.CreateWebResourceResponse(new MemoryStream(Encoding.UTF8.GetBytes(html)), 200, "OK",
                 "Content-Type: text/html; charset=utf-8\r\nCache-Control: no-store\r\nContent-Security-Policy: " + Pages.Csp);
             return;
         }
@@ -436,7 +477,7 @@ public sealed class BrowserTab
         var ctx = e.ResourceContext;
         if (ctx == CoreWebView2WebResourceContext.Document) return;
         if (Services.Blocker.ShouldBlock(uri, UrlResolver.HostOf(Url), MapType(ctx)))
-            e.Response = Services.Env.CreateWebResourceResponse(null, 403, "Blocked", "");
+            e.Response = rEnv.CreateWebResourceResponse(null, 403, "Blocked", "");
     }
 
     public void Dispose(Grid content)

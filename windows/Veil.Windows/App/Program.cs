@@ -52,7 +52,14 @@ public static class Program
         }
 
         Services.Init();
+        Task.Run(() => Veil.Tor.TorBrowserEnv.CleanStale(null));     // leftovers of a Tor window that was killed
         var app = new Application { ShutdownMode = ShutdownMode.OnMainWindowClose };
+        app.Exit += (s, e) =>
+        {
+            // Tor windows are closed with the main window; make sure tor.exe is gone and no Tor session data is left behind.
+            Veil.Tor.TorManager.Instance.Shutdown();
+            Veil.Tor.TorBrowserEnv.DeleteAllNow();
+        };
         app.DispatcherUnhandledException += (s, e) =>
         {
             Report("Error", e.Exception);

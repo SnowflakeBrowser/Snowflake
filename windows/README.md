@@ -26,6 +26,12 @@ Settings > Default apps. Links you click then open as a new tab in the running V
 Expect to fix a few compile errors on the first `dotnet build` (the GitHub workflow will show them). Please test with the
 checklist in the main README plus: tabs in the background, `window.open` popups (Google sign-in), downloads, and ad blocking.
 
+## Tor window
+
+Menu ▸ **New Tor window** (Alt+Shift+N) opens a separate window whose traffic goes through the official Tor daemon. Needs `tor.exe`
+in a `tor` folder next to `Veil.exe`: run `scripts\build_windows.ps1 -FetchTor`. Design, limits and test plan: [TOR-WINDOW.md](TOR-WINDOW.md).
+**Like the rest of this port, the Tor code has not been compiled or run yet.**
+
 ## What differs from the Mac version
 
 | Area | Windows behaviour |
