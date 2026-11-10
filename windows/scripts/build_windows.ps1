@@ -1,19 +1,28 @@
 <#
  Builds Veil for Windows (x64).  Requires the .NET 8 SDK:  winget install Microsoft.DotNet.SDK.8
- Usage:   .\windows\scripts\build_windows.ps1 [-Version 1.0.0] [-FrameworkDependent]
+ Usage:   .\windows\scripts\build_windows.ps1 [-Version 1.0.0] [-FrameworkDependent] [-NoTor]
  Output:  windows\dist\Veil-<version>-win-x64\Veil.exe  (+ a .zip next to it)
- Default is self-contained (no .NET install needed, ~150 MB). -FrameworkDependent is much smaller but
- needs the ".NET 8 Desktop Runtime" installed on the PC.
 #>
 param(
   [string]$Version = "0.1.0",
-  [switch]$FrameworkDependent
+  [switch]$FrameworkDependent,
+  [switch]$NoTor
 )
 $ErrorActionPreference = "Stop"
 $root = Resolve-Path (Join-Path $PSScriptRoot "..")
 $proj = Join-Path $root "Veil.Windows\Veil.Windows.csproj"
 $out  = Join-Path $root "dist\Veil-$Version-win-x64"
 $sc   = if ($FrameworkDependent) { "false" } else { "true" }
+
+$torDir = Join-Path $root "Veil.Windows\ThirdParty\tor"
+$hasTor = [bool](Get-ChildItem $torDir -Recurse -Filter tor.exe -ErrorAction SilentlyContinue | Select-Object -First 1)
+if (-not $hasTor -and -not $NoTor) {
+  $env:PATH += ";C:\Program Files\Git\usr\bin"
+  try { & (Join-Path $PSScriptRoot "fetch_tor.ps1") }
+  catch { Write-Warning "Could not fetch Tor: $($_.Exception.Message)" }
+  $hasTor = [bool](Get-ChildItem $torDir -Recurse -Filter tor.exe -ErrorAction SilentlyContinue | Select-Object -First 1)
+}
+if (-not $hasTor) { Write-Warning "No tor.exe in Veil.Windows\ThirdParty\tor: this build has no Tor." }
 
 if (Test-Path $out) { Remove-Item $out -Recurse -Force }
 dotnet publish $proj -c Release -r win-x64 --self-contained $sc `
