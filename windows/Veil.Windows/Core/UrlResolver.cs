@@ -53,7 +53,13 @@ public static class UrlResolver
         return host.Length == 0 ? null : host;
     }
 
-    static bool LooksLikeHost(string s)
+    public static bool IsExplicitUrl(string raw)
+    {
+        var low = (raw ?? "").Trim().ToLowerInvariant();
+        return low.StartsWith("http://") || low.StartsWith("https://") || low.StartsWith("file://") || low.StartsWith("veil://");
+    }
+
+    public static bool LooksLikeHost(string s)
     {
         if (s.Any(char.IsWhiteSpace)) return false;
         var host = HostPart(s);

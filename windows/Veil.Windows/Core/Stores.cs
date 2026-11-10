@@ -5,6 +5,19 @@ public sealed class HistoryStore
     readonly JsonStore<List<HistoryEntry>> store = new("history", () => new());
     public int Count => store.Value.Count;
 
+    /// Most visited sites (no "www."), best first. Used by the address-bar suggestions.
+    public List<string> TopHosts(int limit = 300)
+    {
+        var counts = new Dictionary<string, int>();
+        foreach (var e in store.Value.ToList())
+        {
+            var h = Autocomplete.BareHost(UrlResolver.HostOf(e.Url));
+            if (h.Length == 0) continue;
+            counts[h] = counts.TryGetValue(h, out var c) ? c + 1 : 1;
+        }
+        return counts.OrderByDescending(kv => kv.Value).ThenBy(kv => kv.Key, StringComparer.Ordinal).Take(limit).Select(kv => kv.Key).ToList();
+    }
+
     public void Add(string url, string title)
     {
         store.Mutate(list =>
