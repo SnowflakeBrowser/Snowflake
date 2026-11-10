@@ -1,0 +1,42 @@
+Third-party software shipped with Veil for Windows: Tor
+=======================================================
+
+Veil's "New Tor window" runs the unmodified `tor` daemon from the official Tor Expert Bundle published by the
+Tor Project (https://www.torproject.org/download/tor/). Veil does not implement or modify the Tor protocol.
+The bundle is placed in the "tor" folder next to Veil.exe (see windows\scripts\fetch_tor.ps1, which also records
+the exact release in tor\VERSION.txt).
+
+Tor
+  Copyright (c) 2001-2004, Roger Dingledine
+  Copyright (c) 2004-2007, Roger Dingledine, Nick Mathewson
+  Copyright (c) 2007-, The Tor Project, Inc.
+  Licensed under the 3-clause BSD license.
+
+The BSD 3-clause license requires that redistributions in binary form reproduce the copyright notice, the list of
+conditions and the disclaimer in the documentation or other materials that come with the distribution:
+
+  Redistribution and use in source and binary forms, with or without modification, are permitted provided that
+  the following conditions are met:
+    * Redistributions of source code must retain the above copyright notice, this list of conditions and the
+      following disclaimer.
+    * Redistributions in binary form must reproduce the above copyright notice, this list of conditions and the
+      following disclaimer in the documentation and/or other materials provided with the distribution.
+    * Neither the names of the copyright owners nor the names of its contributors may be used to endorse or promote
+      products derived from this software without specific prior written permission.
+  THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES,
+  INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+  DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+  SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+  SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
+  WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE
+  USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+The tor binaries also contain or link third-party libraries (for example libevent, zlib and OpenSSL) under their own
+licenses. The complete, authoritative license text for the exact release you ship is the LICENSE file of the Tor
+source code for that release (https://gitlab.torproject.org/tpo/core/tor) plus the notices of those libraries.
+BEFORE DISTRIBUTING a build, add those texts (or ship any license files that come inside the bundle, which the
+build copies automatically) - this notice is not a substitute for them.
+
+"Tor" and the Tor onion logo are trademarks of The Tor Project, Inc. Veil uses the word only to say that a window's
+traffic is routed through the Tor network. Veil is not Tor Browser and is not affiliated with or endorsed by the
+Tor Project; see https://www.torproject.org/about/trademark/ before using their logo or name in marketing.
