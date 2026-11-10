@@ -89,6 +89,7 @@ static class Theme
         r["Text"] = Solid(dark ? Rgb(236, 236, 240) : Rgb(27, 27, 31));
         r["Mute"] = Solid(dark ? Rgb(154, 154, 166) : Rgb(102, 102, 111));
         r["Line"] = Solid(dark ? Alpha(0x2B, 255) : Alpha(0x2B, 0));
+        r["TabClear"] = Brushes.Transparent;
         r["TabIdle"] = Solid(dark ? Alpha(0x09, 255) : Alpha(0x08, 0));
         r["TabHover"] = Solid(dark ? Alpha(0x14, 255) : Alpha(0x0F, 0));
         var accent = Accents.TryGetValue(Services.Settings.Str("accent") ?? "", out var a) ? a : Accents["mist"];
@@ -96,7 +97,7 @@ static class Theme
     }
 }
 
-public sealed class MainWindow : Window
+public sealed partial class MainWindow : Window
 {
     public static MainWindow Current;
 
@@ -152,7 +153,7 @@ public sealed class MainWindow : Window
         Grid.SetColumn(sideWrap, 0);
         rootGrid.Children.Add(sideWrap);
 
-        for (int i = 0; i < 4; i++) chrome.RowDefinitions.Add(new RowDefinition { Height = i == 3 ? new GridLength(1, GridUnitType.Star) : GridLength.Auto });
+        for (int i = 0; i < 5; i++) chrome.RowDefinitions.Add(new RowDefinition { Height = i == 4 ? new GridLength(1, GridUnitType.Star) : GridLength.Auto });
         Grid.SetColumn(chrome, 1);
         rootGrid.Children.Add(chrome);
 
@@ -162,6 +163,7 @@ public sealed class MainWindow : Window
 
         var toolbar = BuildToolbar();
         Grid.SetRow(toolbar, 1); chrome.Children.Add(toolbar);
+        InitSuggestions();
 
         bookmarksWrap.Child = new ScrollViewer { Content = bookmarksBar, HorizontalScrollBarVisibility = ScrollBarVisibility.Hidden, VerticalScrollBarVisibility = ScrollBarVisibility.Disabled };
         bookmarksBar.Orientation = Orientation.Horizontal;
@@ -169,7 +171,10 @@ public sealed class MainWindow : Window
         bookmarksWrap.SetResourceReference(Border.BackgroundProperty, "Bar");
         Grid.SetRow(bookmarksWrap, 2); chrome.Children.Add(bookmarksWrap);
 
-        Grid.SetRow(content, 3); chrome.Children.Add(content);
+        var findRow = BuildFindBar();
+        Grid.SetRow(findRow, 3); chrome.Children.Add(findRow);
+        InitSplitLayout();
+        Grid.SetRow(content, 4); chrome.Children.Add(content);
         Content = rootGrid;
 
         PreviewKeyDown += (s, e) =>
@@ -180,6 +185,16 @@ public sealed class MainWindow : Window
         };
         Services.Changed += () => Dispatcher.BeginInvoke(new Action(OnServicesChanged));
         SourceInitialized += (s, e) => ApplyTitleBar();
+        PreviewMouseDown += (s, e) =>
+        {
+            if (!Services.Settings.Bool("mouseNavButtons")) return;
+            if (e.ChangedButton == MouseButton.XButton1) { active?.GoBack(); e.Handled = true; }
+            else if (e.ChangedButton == MouseButton.XButton2) { active?.GoForward(); e.Handled = true; }
+        };
+        idleTimer.Tick += (_, __) => DiscardIdleTabs();
+        idleTimer.Start();
+        cookieTimer.Tick += (_, __) => _ = KeepSessionCookiesAsync();
+        cookieTimer.Start();
         Loaded += async (s, e) => await StartAsync();
         Closing += OnClosing;
     }
@@ -190,13 +205,17 @@ public sealed class MainWindow : Window
         try { await Services.InitEnvAsync(); }
         catch (Exception ex)
         {
-            if (MessageBox.Show("Veil needs the Microsoft WebView2 Runtime, which could not be started.\n\n" + ex.Message +
-                                "\n\nOpen the download page?", "Veil", MessageBoxButton.YesNo, MessageBoxImage.Error) == MessageBoxResult.Yes)
+            if (MessageBox.Show("Veil could not start its browser engine.\n\n" + ex.Message +
+                                "\n\nIf this says the Microsoft WebView2 Runtime is missing, install it. Open the download page?", "Veil", MessageBoxButton.YesNo, MessageBoxImage.Error) == MessageBoxResult.Yes)
                 System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("https://developer.microsoft.com/microsoft-edge/webview2/") { UseShellExecute = true });
             Close();
             return;
         }
         _ = Services.Blocker.RebuildAsync();
+        Services.Downloads.Started += () => Dispatcher.BeginInvoke(new Action(() =>
+        {
+            if (Services.Settings.Bool("openDownloadsOnStart")) OpenInternal("veil://downloads");
+        }));
         var w = Services.Window.Value;
         if (Services.Settings.Bool("rememberWindow") && !double.IsNaN(w.Left))
         {
@@ -282,7 +301,7 @@ public sealed class MainWindow : Window
         reloadB = Btn("\uE72C", "Reload (Ctrl+R)", () => { if (active != null) { if (active.Loading) active.Stop(); else active.Reload(); } });
         starB = Btn("\uE734", "Bookmark this page (Ctrl+D)", ToggleBookmark);
         shieldB = Btn("🛡", "Blocking for this site", ToggleShield, 13); shieldB.FontFamily = new FontFamily("Segoe UI Emoji");
-        dlB = Btn("\uE896", "Downloads (Ctrl+J)", () => OpenInternal("veil://downloads"));
+        dlB = Btn("\uE896", "Downloads (Ctrl+J)", () => ShowDownloadsMenu());
         menuB = Btn("\uE712", "Menu", () => ShowMainMenu());
 
         address.BorderThickness = new Thickness(0);
@@ -304,7 +323,7 @@ public sealed class MainWindow : Window
             }
             else if (e.Key == Key.Escape) { UpdateChrome(true); active?.FocusPage(); e.Handled = true; }
         };
-        var field = new Border { CornerRadius = new CornerRadius(10), Height = 34, Margin = new Thickness(6, 0, 6, 0), Child = address, BorderThickness = new Thickness(1) };
+        var field = addressBox = new Border { CornerRadius = new CornerRadius(10), Height = 34, Margin = new Thickness(6, 0, 6, 0), Child = address, BorderThickness = new Thickness(1) };
         field.SetResourceReference(Border.BackgroundProperty, "Field");
         field.SetResourceReference(Border.BorderBrushProperty, "Line");
 
@@ -317,26 +336,6 @@ public sealed class MainWindow : Window
         return wrap;
     }
 
-    void ShowMainMenu()
-    {
-        VeilMenu.Show(menuB, new[]
-        {
-            MenuEntry.Item("New tab", () => NewTab(), "Ctrl+T"),
-            MenuEntry.Item("New private tab", () => NewTab(null, true), "Ctrl+Shift+N"),
-            MenuEntry.Sep(),
-            MenuEntry.Item("History", () => OpenInternal("veil://history"), "Ctrl+H"),
-            MenuEntry.Item("Bookmarks", () => OpenInternal("veil://bookmarks")),
-            MenuEntry.Item("Downloads", () => OpenInternal("veil://downloads"), "Ctrl+J"),
-            MenuEntry.Sep(),
-            MenuEntry.Item("Privacy", () => OpenInternal("veil://privacy")),
-            MenuEntry.Item("Settings", () => OpenInternal("veil://settings"), "Ctrl+,"),
-            MenuEntry.Sep(),
-            MenuEntry.Item("Vertical tabs", () => ToggleVertical(), "Ctrl+Shift+\\"),
-            MenuEntry.Item("Full screen", () => SetFullscreen(!fullscreen), "F11"),
-            MenuEntry.Sep(),
-            MenuEntry.Item("Exit", () => Close()),
-        }, rightAlign: true);
-    }
 
     void ShowTabMenu(BrowserTab t)
     {
@@ -411,24 +410,27 @@ public sealed class MainWindow : Window
         if (active != null && active.Url == UrlResolver.NewTab) active.Navigate(url); else NewTab(url);
     }
 
-    public BrowserTab NewTab(string url = null, bool isPrivate = false, bool activate = true)
+    public BrowserTab NewTab(string url = null, bool isPrivate = false, bool activate = true, BrowserTab opener = null)
     {
         var t = new BrowserTab(this, isPrivate) { Url = url ?? UrlResolver.NewTab };
         t.PendingUrl = t.Url;
         t.Header = MakeHeader(t);
         t.Changed += () => Refresh(t);
-        int idx = Services.Settings.Bool("newTabNextToCurrent") && active != null ? tabs.IndexOf(active) + 1 : tabs.Count;
+        int idx = tabs.Count;
+        if (opener != null && tabs.Contains(opener) && Services.Settings.Bool("linkTabsNextToOpener")) idx = tabs.IndexOf(opener) + 1;
+        else if (Services.Settings.Bool("newTabNextToCurrent") && active != null && tabs.Contains(active)) idx = tabs.IndexOf(active) + 1;
         tabs.Insert(idx, t);
         tabStrip.Children.Insert(idx, t.Header);
         FitTabs();
+        UpdateTabBadge();
         Refresh(t);
         if (activate) Activate(t);
         return t;
     }
 
-    public async Task<BrowserTab> CreatePopupTabAsync(bool priv)
+    public async Task<BrowserTab> CreatePopupTabAsync(bool priv, BrowserTab opener = null)
     {
-        var t = NewTab("", priv, false);
+        var t = NewTab("", priv, false, opener);
         t.IsPopup = true; t.PendingUrl = null;
         Activate(t);
         await t.EnsureCreatedAsync(content);
@@ -437,8 +439,12 @@ public sealed class MainWindow : Window
 
     public void Activate(BrowserTab t)
     {
+        if (splitLeft != null && t != splitLeft && t != splitRight) { splitLeft = null; splitRight = null; }
+        if (active != null) active.LastActive = DateTime.Now;
         active = t;
-        foreach (var x in tabs) { if (x.Host != null) x.Host.Visibility = x == t ? Visibility.Visible : Visibility.Collapsed; Refresh(x); }
+        t.LastActive = DateTime.Now;
+        foreach (var x in tabs) { if (x.Host != null) x.Host.Visibility = PaneVisible(x, t) ? Visibility.Visible : Visibility.Collapsed; Refresh(x); }
+        LayoutPanes();
         _ = ShowAsync(t);
         UpdateChrome(true);
         SaveSession();
@@ -449,7 +455,8 @@ public sealed class MainWindow : Window
         try { await t.EnsureCreatedAsync(content); }
         catch (Exception ex) { MessageBox.Show("Could not create a browser view:\n" + ex.Message, "Veil"); return; }
         if (t.Host == null) return;
-        t.Host.Visibility = active == t ? Visibility.Visible : Visibility.Collapsed;
+        t.Host.Visibility = PaneVisible(t, active) ? Visibility.Visible : Visibility.Collapsed;
+        LayoutPanes();
         if (active != t) return;
         if (t.Url == UrlResolver.NewTab || t.Url == "") { address.Focus(); address.SelectAll(); } else t.FocusPage();
     }
@@ -458,10 +465,12 @@ public sealed class MainWindow : Window
     {
         int i = tabs.IndexOf(t);
         if (i < 0) return;
+        if (t == splitLeft || t == splitRight) { splitLeft = null; splitRight = null; }
         if (!t.IsPrivate && t.Url.StartsWith("http")) closed.Push(t.Url);
         tabs.RemoveAt(i);
         tabStrip.Children.Remove(t.Header);
         FitTabs();
+        UpdateTabBadge();
         t.Dispose(content);
         if (tabs.Count == 0) { Close(); return; }
         if (active == t) Activate(tabs[Math.Min(i, tabs.Count - 1)]);
@@ -506,7 +515,7 @@ public sealed class MainWindow : Window
         var p = (Parts)t.Header.Tag;
         bool on = t == active;
         t.Header.SetResourceReference(Border.BackgroundProperty, on ? "TabActive" : "TabIdle");
-        t.Header.SetResourceReference(Border.BorderBrushProperty, on ? "Accent" : "Line");
+        t.Header.SetResourceReference(Border.BorderBrushProperty, on ? "Accent" : (Services.Settings.Bool("tabOutlines") ? "Line" : "TabClear"));
         p.Title.SetResourceReference(TextBlock.ForegroundProperty, on ? "Text" : "Mute");
     }
 
@@ -544,6 +553,9 @@ public sealed class MainWindow : Window
     {
         Theme.Apply();
         ApplyTitleBar();
+        UpdateTabBadge();
+        TitleBar.SetOpacity(this, Services.Settings.Int("windowOpacity"));
+        foreach (var tt in tabs) StyleHeader(tt);
         var S = Services.Settings;
         Topmost = S.Bool("alwaysOnTop");
         starB.Visibility = S.Bool("hideBookmarkButton") ? Visibility.Collapsed : Visibility.Visible;
@@ -570,6 +582,125 @@ public sealed class MainWindow : Window
         UpdateChrome(false);
     }
 
+    // ---------- settings that need a little native help ----------
+    readonly System.Windows.Threading.DispatcherTimer idleTimer = new() { Interval = TimeSpan.FromSeconds(60) };
+    readonly System.Windows.Threading.DispatcherTimer cookieTimer = new() { Interval = TimeSpan.FromSeconds(45) };
+
+    /// "Unload tabs you have not used for a while": frees the memory of idle background tabs; they reload when you click them.
+    void DiscardIdleTabs()
+    {
+        int mins = Services.Settings.Int("discardIdleTabsMinutes");
+        if (mins <= 0) return;
+        foreach (var t in tabs.ToList())
+        {
+            if (t == active || t.Core == null || t.IsPrivate || t.IsPopup || t.Audible || t.Loading) continue;
+            if ((DateTime.Now - t.LastActive).TotalMinutes < mins) continue;
+            t.PendingUrl = t.Url;
+            t.Dispose(content);
+        }
+    }
+
+    /// "Keep me signed in across restarts": turns login (session) cookies into 30-day cookies so they survive quitting.
+    async Task KeepSessionCookiesAsync()
+    {
+        try
+        {
+            if (!Services.Settings.Bool("keepSessionCookies")) return;
+            var core = PersistentCore();
+            if (core == null) return;
+            foreach (var c in await core.CookieManager.GetCookiesAsync(null))
+            {
+                if (!c.IsSession) continue;
+                c.Expires = DateTime.UtcNow.AddDays(30);
+                core.CookieManager.AddOrUpdateCookie(c);
+            }
+        }
+        catch { }
+    }
+
+    /// "Show tab count": number badge on the taskbar icon.
+    void UpdateTabBadge()
+    {
+        try
+        {
+            if (TaskbarItemInfo == null) TaskbarItemInfo = new System.Windows.Shell.TaskbarItemInfo();
+            if (!Services.Settings.Bool("dockTabCount") || tabs.Count == 0) { TaskbarItemInfo.Overlay = null; return; }
+            var accent = ((SolidColorBrush)FindResource("Accent")).Color;
+            bool darkAccent = (accent.R * 299 + accent.G * 587 + accent.B * 114) / 1000 < 140;
+            var dv = new DrawingVisual();
+            using (var dc = dv.RenderOpen())
+            {
+                dc.DrawEllipse(new SolidColorBrush(accent), null, new Point(16, 16), 15, 15);
+                var ft = new FormattedText(tabs.Count.ToString(), System.Globalization.CultureInfo.InvariantCulture, FlowDirection.LeftToRight,
+                    new Typeface("Segoe UI"), tabs.Count > 9 ? 15 : 19, darkAccent ? Brushes.White : Brushes.Black, VisualTreeHelper.GetDpi(this).PixelsPerDip);
+                dc.DrawText(ft, new Point(16 - ft.Width / 2, 16 - ft.Height / 2));
+            }
+            var rtb = new System.Windows.Media.Imaging.RenderTargetBitmap(32, 32, 96, 96, PixelFormats.Pbgra32);
+            rtb.Render(dv);
+            rtb.Freeze();
+            TaskbarItemInfo.Overlay = rtb;
+        }
+        catch { }
+    }
+
+    readonly Dictionary<string, ImageSource> favCache = new();
+    readonly HashSet<string> favTried = new();
+
+    ImageSource FaviconFor(string host)
+    {
+        if (string.IsNullOrEmpty(host)) return null;
+        if (favCache.TryGetValue(host, out var cached)) return cached;
+        ImageSource src = null;
+        var bytes = Services.LoadFavicon(host);
+        if (bytes != null && bytes.Length > 0)
+        {
+            try
+            {
+                var bi = new System.Windows.Media.Imaging.BitmapImage();
+                bi.BeginInit();
+                bi.CacheOption = System.Windows.Media.Imaging.BitmapCacheOption.OnLoad;
+                bi.StreamSource = new MemoryStream(bytes);
+                bi.EndInit();
+                bi.Freeze();
+                src = bi;
+            }
+            catch { }
+        }
+        if (src != null) favCache[host] = src;
+        return src;
+    }
+
+    /// Bookmarks of sites that were never opened get their icon from the site's own /favicon.ico (once per site).
+    async Task FetchFaviconAsync(string host)
+    {
+        try
+        {
+            using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(6) };
+            http.DefaultRequestHeaders.UserAgent.ParseAdd("Mozilla/5.0");
+            var bytes = await http.GetByteArrayAsync("https://" + host + "/favicon.ico");
+            if (bytes.Length < 100 || bytes.Length > 300000) return;
+            var bi = new System.Windows.Media.Imaging.BitmapImage();
+            bi.BeginInit();
+            bi.CacheOption = System.Windows.Media.Imaging.BitmapCacheOption.OnLoad;
+            bi.StreamSource = new MemoryStream(bytes);
+            bi.EndInit();                       // throws if the file is not a real image
+            Services.SaveFavicon(host, bytes);  // the bar redraws with the icon
+        }
+        catch { }
+    }
+
+    FrameworkElement LetterIcon(string host, string title)
+    {
+        var t = !string.IsNullOrEmpty(host) ? host : (title ?? "");
+        if (t.StartsWith("www.")) t = t.Substring(4);
+        var letter = t.Length > 0 ? t.Substring(0, 1).ToUpperInvariant() : "+";
+        var tb = new TextBlock { Text = letter, FontSize = 9, FontWeight = FontWeights.SemiBold, HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center };
+        tb.SetResourceReference(TextBlock.ForegroundProperty, "Accent");
+        var bd = new Border { Width = 16, Height = 16, CornerRadius = new CornerRadius(4), Margin = new Thickness(0, 0, 6, 0), Child = tb, BorderThickness = new Thickness(1) };
+        bd.SetResourceReference(Border.BorderBrushProperty, "Line");
+        return bd;
+    }
+
     void RebuildBookmarks()
     {
         bookmarksBar.Children.Clear();
@@ -579,7 +710,17 @@ public sealed class MainWindow : Window
         foreach (var bm in Services.Bookmarks.All)
         {
             var title = bm.Title.Length > 22 ? bm.Title.Substring(0, 21) + "…" : bm.Title;
-            var b = new Button { Content = title, Template = FlatTemplate, Background = Brushes.Transparent, Padding = new Thickness(8, 3, 8, 3), Margin = new Thickness(1, 0, 1, 0), Focusable = false, ToolTip = bm.Url, FontSize = 12 };
+            var host = UrlResolver.HostOf(bm.Url);
+            var row = new StackPanel { Orientation = Orientation.Horizontal };
+            var ico = FaviconFor(host);
+            if (ico != null) row.Children.Add(new Image { Source = ico, Width = 16, Height = 16, Margin = new Thickness(0, 0, 6, 0) });
+            else
+            {
+                row.Children.Add(LetterIcon(host, bm.Title));
+                if (!string.IsNullOrEmpty(host) && favTried.Add(host) && bm.Url.StartsWith("http", StringComparison.OrdinalIgnoreCase)) _ = FetchFaviconAsync(host);
+            }
+            row.Children.Add(new TextBlock { Text = title, VerticalAlignment = VerticalAlignment.Center });
+            var b = new Button { Content = row, Template = FlatTemplate, Background = Brushes.Transparent, Padding = new Thickness(8, 3, 8, 3), Margin = new Thickness(1, 0, 1, 0), Focusable = false, ToolTip = bm.Url, FontSize = 12 };
             b.SetResourceReference(Control.ForegroundProperty, "Text");
             var url = bm.Url;
             b.Click += (_, __) => active?.Navigate(url);
@@ -597,6 +738,7 @@ public sealed class MainWindow : Window
     public bool HandleShortcut(Key key, bool ctrl, bool shift, bool alt)
     {
         if (ctrl && alt && key == Key.H) { Panic(); return true; }
+        if (HandleExtraShortcut(key, ctrl, shift, alt)) return true;
         if (ctrl && !alt)
         {
             if (key >= Key.D1 && key <= Key.D8) { int i = key - Key.D1; if (i < tabs.Count) Activate(tabs[i]); return true; }

@@ -32,6 +32,7 @@ public sealed class BrowserTab
     public ImageSource Favicon;
     public bool Loading, Audible, Muted;
     public string PendingUrl;
+    public DateTime LastActive = DateTime.Now;
     public bool IsPopup;                    // created for window.open: the engine navigates it, we must not
     public Border Header;                   // tab strip item (built by MainWindow)
     public event Action Changed;
@@ -60,6 +61,20 @@ public sealed class BrowserTab
     public bool CanGoBack => Core != null && Core.CanGoBack;
     public bool CanGoForward => Core != null && Core.CanGoForward;
     void Raise() => Changed?.Invoke();
+
+    /// Small trace file (%APPDATA%\Veil\debug.log) so problems loading Veil's own pages can be found.
+    public static void Dbg(string msg)
+    {
+        try
+        {
+            var dir = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "Veil");
+            Directory.CreateDirectory(dir);
+            var f = System.IO.Path.Combine(dir, "debug.log");
+            if (File.Exists(f) && new FileInfo(f).Length > 200000) File.Delete(f);
+            File.AppendAllText(f, DateTime.Now.ToString("HH:mm:ss.fff") + " " + msg + "\n");
+        }
+        catch { }
+    }
     static void Later(Action a) => Application.Current.Dispatcher.BeginInvoke(a);
 
     public void Navigate(string url)
@@ -104,6 +119,8 @@ public sealed class BrowserTab
         st.AreDevToolsEnabled = Services.Settings.Bool("developerTools");
         ApplyCookieMode();
         Core.AddWebResourceRequestedFilter("*", CoreWebView2WebResourceContext.All);
+        try { Core.AddWebResourceRequestedFilter("veil://*", CoreWebView2WebResourceContext.All); } catch (Exception ex) { Dbg("veil filter: " + ex.Message); }
+        Dbg("tab created, scheme filter added");
         Wire(controller);
         await ApplyScriptsAsync();
 
@@ -150,6 +167,7 @@ public sealed class BrowserTab
                       (S.Bool("sendGPC") ? "try{Object.defineProperty(Navigator.prototype,'globalPrivacyControl',{get:()=>true,configurable:true});}catch(e){}" : "") +
                       "})();");
             if (S.Bool("fingerprintProtection")) await Add(Res.Text("fingerprint.js"));
+            if (S.Bool("videoShortcuts")) await Add(Res.Text("videokeys.js"));
 
             if (S.Bool("opsecWebRTC") || S.Bool("opsecBeacons") || S.Bool("opsecReferrer") || S.Bool("opsecHardware"))
             {
@@ -218,10 +236,51 @@ public sealed class BrowserTab
     void Wire(CoreWebView2Controller controller)
     {
         Core.WebResourceRequested += OnRequest;
+        controller.GotFocus += (s, e) => win.PaneFocused(this);
+        Core.ContextMenuRequested += (s, e) =>
+        {
+            try
+            {
+                var target = e.ContextMenuTarget;
+                int pos = 0;
+                if (target.HasLinkUri)
+                {
+                    var link = target.LinkUri;
+                    var item = Services.Env.CreateContextMenuItem("Open link in private tab", null, CoreWebView2ContextMenuItemKind.Command);
+                    item.CustomItemSelected += (a, b) => win.NewTab(link, true, true, this);
+                    e.MenuItems.Insert(pos++, item);
+                }
+                if (target.HasSelection && !string.IsNullOrWhiteSpace(target.SelectionText))
+                {
+                    var text = target.SelectionText.Trim();
+                    var shown = text.Length > 28 ? text.Substring(0, 27) + "…" : text;
+                    var tpl = SearchEngines.Template(Services.Settings.Str("searchEngine"));
+                    var item = Services.Env.CreateContextMenuItem("Search the web for \"" + shown + "\"", null, CoreWebView2ContextMenuItemKind.Command);
+                    item.CustomItemSelected += (a, b) => win.NewTab(tpl.Replace("%s", Uri.EscapeDataString(text)), IsPrivate, true, this);
+                    e.MenuItems.Insert(pos++, item);
+                }
+            }
+            catch { }
+        };
 
         Core.NavigationStarting += (s, e) =>
         {
             var uri = e.Uri;
+            Dbg("NavigationStarting " + uri);
+            if (uri.StartsWith("veil://", StringComparison.OrdinalIgnoreCase) && !uri.StartsWith("veil://insecure", StringComparison.OrdinalIgnoreCase))
+            {
+                // Veil's own pages are drawn directly (no custom scheme needed), so they always show up.
+                var vhost = Uri.TryCreate(uri, UriKind.Absolute, out var vuri) ? vuri.Host.ToLowerInvariant() : "";
+                var vpage = Pages.Html(vhost);   // the same start page and settings pages as the Mac version
+                if (vpage != null)
+                {
+                    e.Cancel = true;
+                    Url = uri.TrimEnd('/');
+                    Later(() => Core.NavigateToString(vpage));
+                    Raise();
+                    return;
+                }
+            }
             if (uri.StartsWith("veil://insecure", StringComparison.OrdinalIgnoreCase))
             {
                 e.Cancel = true;
@@ -264,6 +323,7 @@ public sealed class BrowserTab
         Core.NavigationCompleted += (s, e) =>
         {
             Loading = false;
+            Dbg("NavigationCompleted ok=" + e.IsSuccess + " status=" + e.WebErrorStatus + " source=" + Core.Source);
             if (!e.IsSuccess)
             {
                 if (pendingUpgrade is { } up && e.WebErrorStatus != CoreWebView2WebErrorStatus.OperationCanceled)
@@ -317,6 +377,7 @@ public sealed class BrowserTab
         Core.ContainsFullScreenElementChanged += (s, e) => win.SetFullscreen(Core.ContainsFullScreenElement);
         Core.WindowCloseRequested += (s, e) => win.CloseTab(this);
         Core.DownloadStarting += (s, e) => Services.Downloads.Attach(e);
+        Core.ProcessFailed += (s, e) => Dbg("ProcessFailed " + e.ProcessFailedKind + " " + e.Reason);
 
         Core.NewWindowRequested += async (s, e) =>
         {
@@ -324,7 +385,7 @@ public sealed class BrowserTab
             var d = e.GetDeferral();
             try
             {
-                var t = await win.CreatePopupTabAsync(IsPrivate);
+                var t = await win.CreatePopupTabAsync(IsPrivate, this);
                 e.NewWindow = t.Core;
                 e.Handled = true;
             }
@@ -348,7 +409,13 @@ public sealed class BrowserTab
 
         Core.WebMessageReceived += async (s, e) =>
         {
-            if (!(e.Source ?? "").StartsWith("veil://", StringComparison.OrdinalIgnoreCase)) return;   // web pages can never use the bridge
+            Dbg("WebMessage from " + e.Source);
+            // Only Veil's own pages may use the bridge: either served from veil://, or drawn directly while this tab is showing a veil:// page.
+            var origin = e.Source ?? "";
+            bool ours = origin.StartsWith("veil://", StringComparison.OrdinalIgnoreCase)
+                        || ((origin.StartsWith("data:text/html", StringComparison.OrdinalIgnoreCase) || origin == "about:blank")
+                            && Url.StartsWith("veil://", StringComparison.OrdinalIgnoreCase));
+            if (!ours) return;
             try
             {
                 using var doc = JsonDocument.Parse(e.WebMessageAsJson);
@@ -357,7 +424,7 @@ public sealed class BrowserTab
                 var cmd = root.GetProperty("cmd").GetString();
                 var args = root.TryGetProperty("args", out var a) ? a : default;
                 JsonNode result = null;
-                try { result = await Bridge.Handle(this, cmd, args); } catch { }
+                try { result = await Bridge.Handle(this, cmd, args); } catch (Exception bex) { Dbg("Bridge " + cmd + " failed: " + bex); }
                 Core.PostWebMessageAsJson(new JsonObject { ["id"] = id, ["result"] = result }.ToJsonString());
             }
             catch { }
@@ -376,6 +443,7 @@ public sealed class BrowserTab
         var uri = e.Request.Uri;
         if (uri.StartsWith("veil://", StringComparison.OrdinalIgnoreCase))
         {
+            Dbg("Request " + uri);
             string html;
             try { html = Uri.TryCreate(uri, UriKind.Absolute, out var u) ? Pages.Html(u.Host) : null; }
             catch (Exception ex)
@@ -384,6 +452,7 @@ public sealed class BrowserTab
                 html = "<!doctype html><meta charset=utf-8><body style=\"font:14px Segoe UI,sans-serif;padding:24px;color:#ddd;background:#17171a\"><h2>Veil page error</h2><pre style=\"white-space:pre-wrap\">"
                        + Pages.Escape(ex.ToString()) + "</pre>";
             }
+            Dbg("Serving " + uri + " bytes=" + (html == null ? -1 : html.Length));
             if (html == null) { e.Response = Services.Env.CreateWebResourceResponse(null, 404, "Not Found", ""); return; }
             e.Response = Services.Env.CreateWebResourceResponse(new MemoryStream(Encoding.UTF8.GetBytes(html)), 200, "OK",
                 "Content-Type: text/html; charset=utf-8\r\nCache-Control: no-store\r\nContent-Security-Policy: " + Pages.Csp);
