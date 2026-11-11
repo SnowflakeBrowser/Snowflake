@@ -66,29 +66,33 @@ try {
     $asc = "$tgz.asc"
     if (-not (Get-First "$file.asc" $asc)) { throw "Could not download $file.asc." }
     $home_ = Join-Path $work "gnupg"; New-Item -ItemType Directory -Force $home_ | Out-Null
+    # Git for Windows' gpg is an MSYS program: it needs /c/Users/... paths, not C:\Users\... (native gpg4win needs the normal form).
+    $msys = $gpg.Source -like "*\usr\bin\*"
+    function P($p) { if ($msys -and $p -match '^([A-Za-z]):[\\/](.*)$') { return "/" + $Matches[1].ToLower() + "/" + ($Matches[2] -replace '\\', '/') }; return $p }
+    $gh = P $home_
     $diag = @()
     $diag += (& gpg --version 2>&1 | Select-Object -First 1)
-    function Get-Fprs { (& gpg --homedir $home_ --batch --with-colons --fingerprint 2>$null) | Where-Object { $_ -like "fpr:*" } | ForEach-Object { ($_ -split ":")[9] } }
+    function Get-Fprs { (& gpg --homedir $gh --batch --with-colons --fingerprint 2>$null) | Where-Object { $_ -like "fpr:*" } | ForEach-Object { ($_ -split ":")[9] } }
     function Has-Key { return ((Get-Fprs) -contains $ExpectedFpr) }
     # 1. gpg's own web-key-directory lookup
-    $diag += (& gpg --homedir $home_ --batch --auto-key-locate "nodefault,wkd" --locate-keys torbrowser@torproject.org 2>&1)
+    $diag += (& gpg --homedir $gh --batch --auto-key-locate "nodefault,wkd" --locate-keys torbrowser@torproject.org 2>&1)
     # 2. the same key file, downloaded directly from the Tor Project
     if (-not (Has-Key)) {
       try {
         $kf = Join-Path $work "tor-key.bin"
         Invoke-WebRequest "https://openpgpkey.torproject.org/.well-known/openpgpkey/torproject.org/hu/kounek7zrdx745qydx6p59t9mqjpuhdf?l=torbrowser" -OutFile $kf -UseBasicParsing
-        $diag += (& gpg --homedir $home_ --batch --import $kf 2>&1)
+        $diag += (& gpg --homedir $gh --batch --import (P $kf) 2>&1)
       } catch { $diag += "direct key download failed: $($_.Exception.Message)" }
     }
     # 3. public key servers, asking for the pinned fingerprint
     foreach ($ks in @("hkps://keys.openpgp.org", "hkps://keyserver.ubuntu.com")) {
       if (Has-Key) { break }
-      $diag += (& gpg --homedir $home_ --batch --keyserver $ks --recv-keys $ExpectedFpr 2>&1)
+      $diag += (& gpg --homedir $gh --batch --keyserver $ks --recv-keys $ExpectedFpr 2>&1)
     }
     if (-not (Has-Key)) {
       throw "Could not obtain the Tor Browser Developers key with fingerprint $ExpectedFpr (found: $((Get-Fprs) -join ', ')). gpg said: $(($diag | Out-String) -replace '[\r\n]+', ' | ')"
     }
-    $out = & gpg --homedir $home_ --batch --status-fd 1 --verify $asc $tgz 2>&1
+    $out = & gpg --homedir $gh --batch --status-fd 1 --verify (P $asc) (P $tgz) 2>&1
     if (-not (($out -match "VALIDSIG") -and ($out -match $ExpectedFpr))) { throw "Signature verification FAILED:`n$out" }
     Write-Host "OpenPGP signature OK (key $ExpectedFpr)"
   }
