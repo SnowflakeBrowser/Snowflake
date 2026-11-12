@@ -30,6 +30,7 @@ public sealed class TorManager
     string detail = "";
     bool stopping;
     Process proc;
+    readonly System.Collections.Concurrent.ConcurrentQueue<string> torOut = new();
     TorControl ctl;
     CancellationTokenSource monitorCts;
 
@@ -71,6 +72,23 @@ public sealed class TorManager
             Directory.CreateDirectory(d);
             return d;
         }
+    }
+
+    void Pump(string line)
+    {
+        if (string.IsNullOrWhiteSpace(line)) return;
+        torOut.Enqueue(line);
+        while (torOut.Count > 40 && torOut.TryDequeue(out _)) { }
+        Log("tor: " + line);
+    }
+
+    string Why(Exception ex)
+    {
+        var p = proc;
+        string exit = "";
+        try { if (p != null && p.HasExited) exit = " (tor.exe exit code " + p.ExitCode + ")"; } catch { }
+        var tail = string.Join(" | ", torOut.TakeLast(12));
+        return ex.Message + exit + (tail.Length > 0 ? "  Tor said: " + tail : "  Tor printed nothing.");
     }
 
     static string Log(string msg)
@@ -217,7 +235,7 @@ public sealed class TorManager
             rc.AppendLine("ClientOnly 1");
             rc.AppendLine("AvoidDiskWrites 1");
             rc.AppendLine("SafeLogging 1");
-            rc.AppendLine("Log notice file " + Q(torLog));
+            rc.AppendLine("Log notice stdout");                       // read by Veil and shown in error messages
             rc.AppendLine("__OwningControllerProcess " + Environment.ProcessId);   // Tor exits by itself if Veil dies
             var torDir = System.IO.Path.GetDirectoryName(exe);
             // geoip data is optional for a client; use it if the bundle ships it (somewhere below the "tor" folder).
@@ -231,15 +249,21 @@ public sealed class TorManager
             }
             File.WriteAllText(torrc, rc.ToString());
 
+            while (torOut.TryDequeue(out _)) { }
             var psi = new ProcessStartInfo(exe)
             {
                 UseShellExecute = false, CreateNoWindow = true, WorkingDirectory = torDir,
+                RedirectStandardOutput = true, RedirectStandardError = true,
             };
             psi.ArgumentList.Add("-f");
             psi.ArgumentList.Add(torrc);
             var p = Process.Start(psi) ?? throw new IOException("Could not start tor.exe.");
             p.EnableRaisingEvents = true;
             p.Exited += (s, e) => Log("tor.exe exited with code " + SafeExit(p));
+            p.OutputDataReceived += (s, e) => Pump(e.Data);
+            p.ErrorDataReceived += (s, e) => Pump(e.Data);
+            p.BeginOutputReadLine();
+            p.BeginErrorReadLine();
             proc = p;
             Log("tor.exe started, pid " + p.Id + ", socks " + port);
 
@@ -287,10 +311,11 @@ public sealed class TorManager
         }
         catch (Exception ex)
         {
-            Log("start failed: " + ex.Message);
+            var why = Why(ex);
+            Log("start failed: " + why);
             KillProcess();
-            Set(TorState.Failed, 0, ex.Message);
-            throw;
+            Set(TorState.Failed, 0, why);
+            throw new IOException(why, ex);
         }
     }
 
