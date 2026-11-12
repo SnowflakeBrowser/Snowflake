@@ -15,7 +15,7 @@ public static class TorPages
 body{background:radial-gradient(900px 520px at 50% -10%,#7d469833,transparent 70%),var(--bg);color:var(--text);
 font:14px/1.55 'Segoe UI Variable Text','Segoe UI',system-ui,sans-serif;display:flex;align-items:center;justify-content:center}
 main{width:min(640px,90vw);display:flex;flex-direction:column;align-items:center;margin-top:-5vh;text-align:center}
-.onion{font-size:54px;line-height:1}h1{font-weight:600;font-size:26px;margin:12px 0 4px}
+.onion{width:76px;height:76px;object-fit:contain}h1{font-weight:600;font-size:26px;margin:12px 0 4px}
 .ok{color:var(--tor);font-weight:600}.mute{color:var(--mute)}
 form{width:100%;margin:26px 0 22px}
 input{width:100%;height:50px;border-radius:25px;border:1px solid var(--line);background:var(--panel);color:var(--text);font:inherit;font-size:16px;padding:0 22px;outline:none}
@@ -24,11 +24,11 @@ input:focus{border-color:var(--tor)}
 .note b{color:var(--text)}
 </style></head><body><main>__BODY__</main></body></html>";
 
-    static string Wrap(string title, string body) => Shell.Replace("__TITLE__", title).Replace("__BODY__", body);
+    static string Wrap(string title, string body) => Shell.Replace("__TITLE__", title).Replace("__BODY__", body).Replace("__LOGO__", TorLogo.DataUri);
 
     /// Start page of a Tor tab. Only ever shown after the connection has been verified.
     public static string NewTab() => Wrap("New Tor tab", @"
-<div class='onion'>🧅</div><h1>Tor window</h1>
+<img class='onion' src='__LOGO__' alt=''><h1>Tor window</h1>
 <div class='ok'>Connected to Tor · verified</div>
 <form id='f'><input id='q' type='text' placeholder='Search DuckDuckGo or enter address' autocomplete='off' spellcheck='false' autofocus></form>
 <div class='note'><b>What this does:</b> sites and your network see Tor, not your IP address, and this window keeps its cookies and history to itself
@@ -46,6 +46,6 @@ document.getElementById('f').addEventListener('submit',function(e){e.preventDefa
 
     /// Shown instead of Veil's normal internal pages (history, settings, …), which must not be reachable from a Tor window.
     public static string Unavailable() => Wrap("Not available", @"
-<div class='onion'>🧅</div><h1>Not available in a Tor window</h1>
+<img class='onion' src='__LOGO__' alt=''><h1>Not available in a Tor window</h1>
 <p class='mute'>History, bookmarks, downloads and settings belong to your normal windows and are kept out of Tor windows on purpose.</p>");
 }
