@@ -237,6 +237,16 @@ public sealed partial class MainWindow
 
     // ---------- UI ----------
 
+    static UIElement OnionImage(double size, Thickness margin)
+    {
+        try
+        {
+            return new Image { Source = TorLogo.Bitmap(), Width = size, Height = size, Margin = margin, Stretch = Stretch.Uniform,
+                               VerticalAlignment = VerticalAlignment.Center, HorizontalAlignment = HorizontalAlignment.Center };
+        }
+        catch { return new TextBlock { Text = "Tor", FontWeight = FontWeights.SemiBold, Margin = margin, VerticalAlignment = VerticalAlignment.Center }; }
+    }
+
     void BuildTorOverlay()
     {
         torOverlayTitle = new TextBlock { FontSize = 20, FontWeight = FontWeights.SemiBold, TextAlignment = TextAlignment.Center, Margin = new Thickness(0, 10, 0, 8) };
@@ -251,7 +261,7 @@ public sealed partial class MainWindow
         torRetryBtn.SetResourceReference(Control.ForegroundProperty, "Text");
         torRetryBtn.Click += (s, e) => TorRetry();
         var stack = new StackPanel { VerticalAlignment = VerticalAlignment.Center, HorizontalAlignment = HorizontalAlignment.Center };
-        stack.Children.Add(new TextBlock { Text = "🧅", FontFamily = new FontFamily("Segoe UI Emoji"), FontSize = 46, HorizontalAlignment = HorizontalAlignment.Center });
+        stack.Children.Add(OnionImage(72, new Thickness(0)));
         stack.Children.Add(torOverlayTitle);
         stack.Children.Add(torOverlayText);
         stack.Children.Add(torRetryBtn);
@@ -267,7 +277,7 @@ public sealed partial class MainWindow
         torLabel = new TextBlock { Text = "Tor…", FontSize = 12, FontWeight = FontWeights.SemiBold, VerticalAlignment = VerticalAlignment.Center };
         torLabel.SetResourceReference(TextBlock.ForegroundProperty, "Text");
         var sp = new StackPanel { Orientation = Orientation.Horizontal };
-        sp.Children.Add(new TextBlock { Text = "🧅", FontFamily = new FontFamily("Segoe UI Emoji"), FontSize = 13, Margin = new Thickness(0, 0, 5, 0), VerticalAlignment = VerticalAlignment.Center });
+        sp.Children.Add(OnionImage(18, new Thickness(0, 0, 6, 0)));
         sp.Children.Add(torDot);
         sp.Children.Add(torLabel);
         var b = new Border
