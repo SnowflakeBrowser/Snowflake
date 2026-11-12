@@ -548,7 +548,7 @@ public sealed partial class MainWindow : Window
     {
         if (t.Header == null) return;
         var p = (Parts)t.Header.Tag;
-        p.Title.Text = (isTor ? "🧅 " : t.IsPrivate ? "🕶 " : "") + t.DisplayTitle;
+        p.Title.Text = (isTor ? "" : t.IsPrivate ? "🕶 " : "") + t.DisplayTitle;
         p.Fav.Source = t.Favicon;
         p.Audio.Content = t.Muted ? "\uE74F" : "\uE767";
         p.Audio.Visibility = t.Audible || t.Muted ? Visibility.Visible : Visibility.Collapsed;
